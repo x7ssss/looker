@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LOOKER // Network Control & Proxy Gateway</title>
+  <title>LOOKER // Network Control & MEGA Studio</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -45,7 +45,7 @@
             <h1 class="text-base font-semibold tracking-tight text-white">LOOKER</h1>
             <span class="text-[10px] mono px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-zinc-400">v0.1.0</span>
           </div>
-          <p class="text-xs text-zinc-500">Autonomous Proxy Scraper & Gateway Daemon</p>
+          <p class="text-xs text-zinc-500">Autonomous Proxy Scraper, Gateway Daemon & MEGA Engine</p>
         </div>
       </div>
       <div class="flex flex-wrap items-center gap-2">
@@ -98,6 +98,94 @@
         <span class="text-[11px] font-medium text-zinc-400">Quarantined</span>
         <div class="text-3xl font-bold mono text-rose-400 mt-2" id="metric-quarantined">0</div>
         <p class="text-[10px] text-zinc-500 mt-1">Tripped circuit breaker</p>
+      </div>
+    </section>
+
+    <!-- MEGA Downloader Studio Section -->
+    <section class="p-5 rounded-xl border border-stroke bg-surface space-y-4">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div class="flex items-center gap-2">
+            <h2 class="text-sm font-semibold text-white tracking-tight">MEGA Downloader Studio</h2>
+            <span class="text-[10px] mono px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-medium">QUOTA-BYPASS ENGINE</span>
+          </div>
+          <p class="text-xs text-zinc-400 mt-0.5">Stream ciphertext over rotating proxy gateway, decrypt in-flight AES-128-CTR & verify CBC-MAC</p>
+        </div>
+      </div>
+
+      <!-- Link Input Box -->
+      <div class="flex flex-col sm:flex-row gap-2">
+        <div class="relative flex-1">
+          <input
+            type="text"
+            id="mega-url-input"
+            placeholder="Paste MEGA.nz URL (e.g. https://mega.nz/folder/... or https://mega.nz/file/...)"
+            class="w-full px-3.5 py-2.5 rounded-lg bg-obsidian border border-stroke text-xs text-zinc-200 placeholder-zinc-500 outline-none focus:border-emerald-500/50 transition-colors mono"
+          />
+        </div>
+        <button
+          onclick="inspectMegaLink()"
+          id="btn-inspect"
+          class="px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-obsidian font-semibold text-xs transition-colors flex items-center justify-center gap-2 shrink-0 disabled:opacity-50"
+        >
+          <svg id="inspect-spinner" class="animate-spin h-3.5 w-3.5 text-obsidian hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+          </svg>
+          <span id="inspect-btn-text">Inspect Link</span>
+        </button>
+      </div>
+
+      <div id="inspect-error" class="hidden p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-400 mono"></div>
+
+      <!-- Inspected Item & File Selection Card -->
+      <div id="inspect-result-container" class="hidden p-4 rounded-xl bg-obsidian border border-stroke space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-stroke">
+          <div class="flex items-center gap-2.5">
+            <span class="px-2 py-0.5 rounded text-[10px] mono bg-emerald-500/10 border border-emerald-500/20 text-emerald-400" id="inspect-type-badge">FOLDER</span>
+            <span class="text-sm font-semibold text-white mono" id="inspect-title">—</span>
+            <span class="text-xs text-zinc-500 mono">•</span>
+            <span class="text-xs text-zinc-400 mono font-medium" id="inspect-total-size">0 B</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <button onclick="selectAllHandles(true)" class="px-2.5 py-1 rounded-md text-[11px] mono bg-surface hover:bg-panel text-zinc-300 border border-stroke transition-colors">Select All</button>
+            <button onclick="selectAllHandles(false)" class="px-2.5 py-1 rounded-md text-[11px] mono bg-surface hover:bg-panel text-zinc-400 border border-stroke transition-colors">Deselect All</button>
+          </div>
+        </div>
+
+        <!-- Node Checklist -->
+        <div class="space-y-1.5 max-h-56 overflow-y-auto pr-1" id="inspect-nodes-list"></div>
+
+        <!-- Download Action & Destination -->
+        <div class="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-stroke">
+          <div class="flex items-center gap-2 text-xs">
+            <span class="text-zinc-400">Destination:</span>
+            <input
+              type="text"
+              id="output-dir-input"
+              value="./downloads"
+              class="px-2.5 py-1 rounded-md bg-surface border border-stroke text-xs text-zinc-200 outline-none focus:border-emerald-500/50 w-44 mono"
+            />
+            <span class="text-zinc-500 mono ml-2" id="selection-summary-text">Selected: 0 files</span>
+          </div>
+          <button
+            onclick="startDownload()"
+            id="btn-start-download"
+            class="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-obsidian font-semibold text-xs transition-colors flex items-center gap-1.5 disabled:opacity-50"
+          >
+            <span>Start Download</span>
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Active Downloads Card -->
+      <div id="tasks-container" class="hidden space-y-3 pt-2">
+        <div class="flex items-center justify-between">
+          <h3 class="text-xs font-semibold text-zinc-300 uppercase tracking-wider">Active Download Tasks</h3>
+          <span class="text-[10px] mono text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded">LIVE QUEUE</span>
+        </div>
+        <div class="space-y-2.5" id="tasks-list"></div>
       </div>
     </section>
 
@@ -171,6 +259,16 @@
   <script>
     let allProxies = [];
     let currentProto = 'all';
+    let inspectedData = null;
+    let selectedHandles = new Set();
+
+    function formatBytes(bytes) {
+      if (!bytes || bytes === 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
 
     function setProtoFilter(proto) {
       currentProto = proto;
@@ -189,7 +287,7 @@
           btn.className = 'proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke';
         }
       }
-      renderTable();
+      fetchProxies();
     }
 
     async function fetchStatus() {
@@ -249,7 +347,8 @@
 
     async function fetchProxies() {
       try {
-        const res = await fetch('/api/proxies?limit=100');
+        const protoParam = currentProto === 'all' ? '' : `&proto=${encodeURIComponent(currentProto.toLowerCase())}`;
+        const res = await fetch(`/api/proxies?limit=100${protoParam}`);
         if (!res.ok) return;
         allProxies = await res.json();
         renderTable();
@@ -259,9 +358,6 @@
     function renderTable() {
       const q = document.getElementById('search-box').value.trim().toLowerCase();
       const filtered = allProxies.filter(p => {
-        if (currentProto !== 'all' && (p.proto || '').toUpperCase() !== currentProto) {
-          return false;
-        }
         const endpoint = (p.endpoint || '').toLowerCase();
         const country = (p.country_code || p.country || '').toLowerCase();
         const proto = (p.proto || '').toLowerCase();
@@ -296,14 +392,234 @@
       }).join('');
     }
 
+    async function inspectMegaLink() {
+      const url = document.getElementById('mega-url-input').value.trim();
+      if (!url) return;
+      const btn = document.getElementById('btn-inspect');
+      const spinner = document.getElementById('inspect-spinner');
+      const btnText = document.getElementById('inspect-btn-text');
+      const errorBox = document.getElementById('inspect-error');
+
+      errorBox.classList.add('hidden');
+      spinner.classList.remove('hidden');
+      btnText.textContent = 'Inspecting...';
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/mega/inspect', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          errorBox.textContent = data.error || 'Inspection failed';
+          errorBox.classList.remove('hidden');
+          return;
+        }
+
+        inspectedData = data;
+        renderInspectorResult();
+      } catch (e) {
+        errorBox.textContent = 'Network error connecting to gateway: ' + e.message;
+        errorBox.classList.remove('hidden');
+      } finally {
+        spinner.classList.add('hidden');
+        btnText.textContent = 'Inspect Link';
+        btn.disabled = false;
+      }
+    }
+
+    function renderInspectorResult() {
+      const container = document.getElementById('inspect-result-container');
+      if (!inspectedData) {
+        container.classList.add('hidden');
+        return;
+      }
+      container.classList.remove('hidden');
+      document.getElementById('inspect-title').textContent = inspectedData.title || 'MEGA Package';
+      document.getElementById('inspect-type-badge').textContent = inspectedData.type ? inspectedData.type.toUpperCase() : 'FILE';
+      document.getElementById('inspect-total-size').textContent = formatBytes(inspectedData.total_size);
+
+      selectedHandles.clear();
+      const fileNodes = (inspectedData.nodes || []).filter(n => !n.is_dir);
+      fileNodes.forEach(n => selectedHandles.add(n.handle));
+
+      const listContainer = document.getElementById('inspect-nodes-list');
+      if (fileNodes.length === 0) {
+        listContainer.innerHTML = '<p class="text-xs text-zinc-500 py-2">No downloadable files detected.</p>';
+      } else {
+        listContainer.innerHTML = fileNodes.map(n => `
+          <label class="flex items-center justify-between p-2 rounded-lg bg-obsidian/70 hover:bg-obsidian border border-stroke text-xs cursor-pointer transition-colors">
+            <div class="flex items-center gap-2.5 truncate mr-2">
+              <input type="checkbox" data-handle="${n.handle}" checked onchange="toggleHandle('${n.handle}', this.checked)" class="rounded bg-surface border-stroke text-emerald-500 focus:ring-0 focus:ring-offset-0 cursor-pointer" />
+              <span class="mono text-zinc-200 truncate" title="${n.path}">${n.path}</span>
+            </div>
+            <span class="mono text-zinc-400 text-[11px] shrink-0">${formatBytes(n.size)}</span>
+          </label>
+        `).join('');
+      }
+
+      updateSelectionSummary();
+    }
+
+    function toggleHandle(handle, checked) {
+      if (checked) {
+        selectedHandles.add(handle);
+      } else {
+        selectedHandles.delete(handle);
+      }
+      updateSelectionSummary();
+    }
+
+    function selectAllHandles(all) {
+      if (!inspectedData) return;
+      const checkboxes = document.querySelectorAll('#inspect-nodes-list input[type="checkbox"]');
+      checkboxes.forEach(cb => {
+        cb.checked = all;
+        const h = cb.getAttribute('data-handle');
+        if (all) selectedHandles.add(h);
+        else selectedHandles.delete(h);
+      });
+      updateSelectionSummary();
+    }
+
+    function updateSelectionSummary() {
+      if (!inspectedData) return;
+      const fileNodes = (inspectedData.nodes || []).filter(n => !n.is_dir);
+      let selectedSize = 0;
+      for (const n of fileNodes) {
+        if (selectedHandles.has(n.handle)) {
+          selectedSize += n.size;
+        }
+      }
+      document.getElementById('selection-summary-text').textContent = 
+        `Selected: ${selectedHandles.size} / ${fileNodes.length} files (${formatBytes(selectedSize)})`;
+      document.getElementById('btn-start-download').disabled = selectedHandles.size === 0;
+    }
+
+    async function startDownload() {
+      if (!inspectedData || selectedHandles.size === 0) return;
+      const url = document.getElementById('mega-url-input').value.trim();
+      const outputDir = document.getElementById('output-dir-input').value.trim() || './downloads';
+      const btn = document.getElementById('btn-start-download');
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/mega/download', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url,
+            selected_handles: Array.from(selectedHandles),
+            output_dir: outputDir
+          })
+        });
+        const d = await res.json();
+        if (res.ok) {
+          document.getElementById('inspect-result-container').classList.add('hidden');
+          fetchTasks();
+        } else {
+          alert('Failed to start download: ' + (d.error || 'Unknown error'));
+        }
+      } catch (e) {
+        alert('Error sending download request: ' + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    async function fetchTasks() {
+      try {
+        const res = await fetch('/api/mega/tasks');
+        if (!res.ok) return;
+        const tasks = await res.json();
+        renderTasks(tasks);
+      } catch (e) {}
+    }
+
+    function renderTasks(tasks) {
+      const container = document.getElementById('tasks-container');
+      const taskList = document.getElementById('tasks-list');
+      if (!tasks || tasks.length === 0) {
+        container.classList.add('hidden');
+        return;
+      }
+      container.classList.remove('hidden');
+
+      taskList.innerHTML = tasks.map(t => {
+        const isRunning = t.status === 'downloading';
+        const statusClass = t.status === 'completed'
+          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
+          : (t.status === 'failed'
+              ? 'bg-rose-500/10 text-rose-400 border-rose-500/20'
+              : (t.status === 'cancelled'
+                  ? 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20'
+                  : 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20 animate-pulse'));
+
+        const etaText = t.eta_seconds > 0 ? `ETA: ${Math.floor(t.eta_seconds / 60)}m ${t.eta_seconds % 60}s` : (t.status === 'completed' ? 'Done' : '—');
+        const speedText = t.speed_mbps > 0 ? `${t.speed_mbps.toFixed(1)} MB/s` : '—';
+        const cancelBtn = isRunning
+          ? `<button onclick="cancelTask('${t.id}')" class="px-2.5 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 text-xs font-medium border border-rose-500/20 transition-colors">Cancel</button>`
+          : '';
+
+        return `
+          <div class="p-3.5 rounded-xl bg-obsidian border border-stroke space-y-2.5 text-xs">
+            <div class="flex items-center justify-between gap-3">
+              <div class="space-y-0.5 truncate">
+                <div class="flex items-center gap-2">
+                  <span class="font-medium text-white truncate">${t.title}</span>
+                  <span class="px-1.5 py-0.5 rounded text-[10px] mono border ${statusClass}">${t.status.toUpperCase()}</span>
+                </div>
+                <p class="text-[10px] text-zinc-500 mono truncate">${t.output_path}</p>
+              </div>
+              <div class="flex items-center gap-2 shrink-0">
+                ${cancelBtn}
+              </div>
+            </div>
+
+            <div class="w-full bg-white/5 rounded-full h-1.5 overflow-hidden">
+              <div class="bg-gradient-to-r from-emerald-500 to-cyan-400 h-full rounded-full transition-all duration-300" style="width: ${t.progress_percent}%"></div>
+            </div>
+
+            <div class="flex items-center justify-between text-[11px] mono text-zinc-400">
+              <div class="flex items-center gap-2">
+                <span class="text-white font-medium">${t.progress_percent.toFixed(1)}%</span>
+                <span class="text-zinc-600">•</span>
+                <span>${formatBytes(t.downloaded_bytes)} / ${formatBytes(t.total_bytes)}</span>
+              </div>
+              <div class="flex items-center gap-2">
+                <span class="text-emerald-400 font-medium">${speedText}</span>
+                <span class="text-zinc-600">•</span>
+                <span class="text-zinc-400">${etaText}</span>
+              </div>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function cancelTask(id) {
+      try {
+        await fetch(`/api/mega/tasks/${id}/cancel`, { method: 'POST' });
+        fetchTasks();
+      } catch (e) {}
+    }
+
     document.getElementById('search-box').addEventListener('input', renderTable);
+    document.getElementById('mega-url-input').addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') inspectMegaLink();
+    });
+
     setInterval(fetchStatus, 1500);
     setInterval(fetchFastest, 2000);
     setInterval(fetchProxies, 3000);
+    setInterval(fetchTasks, 1000);
 
     fetchStatus();
     fetchFastest();
     fetchProxies();
+    fetchTasks();
   </script>
 </body>
 </html>

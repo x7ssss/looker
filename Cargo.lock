@@ -783,8 +783,10 @@ name = "looker-gateway"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "looker-mega",
  "looker-pool",
  "looker-protocol",
+ "reqwest",
  "rust-embed",
  "serde",
  "serde_json",

@@ -7,6 +7,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, info, warn};
 
+use crate::download::DownloadManager;
 use crate::error::GatewayError;
 use looker_pool::ProxyPool;
 use looker_protocol::{
@@ -61,11 +62,22 @@ impl Default for GatewayConfig {
 pub struct ProxyGateway {
     config: GatewayConfig,
     pool: Arc<ProxyPool>,
+    download_mgr: Arc<DownloadManager>,
 }
 
 impl ProxyGateway {
     pub fn new(config: GatewayConfig, pool: Arc<ProxyPool>) -> Self {
-        Self { config, pool }
+        let download_mgr = Arc::new(DownloadManager::new(config.bind_addr.to_string()));
+        Self {
+            config,
+            pool,
+            download_mgr,
+        }
+    }
+
+    pub fn with_download_manager(mut self, mgr: Arc<DownloadManager>) -> Self {
+        self.download_mgr = mgr;
+        self
     }
 
     /// Launches the gateway server loop listening on `config.bind_addr`.
@@ -114,9 +126,10 @@ impl ProxyGateway {
 
                     let pool = Arc::clone(&self.pool);
                     let config = self.config.clone();
+                    let download_mgr = Arc::clone(&self.download_mgr);
 
                     tracker.spawn(async move {
-                        if let Err(e) = handle_client(client_stream, client_addr, pool, config).await {
+                        if let Err(e) = handle_client(client_stream, client_addr, pool, config, download_mgr).await {
                             debug!("Client {} finished with error: {}", client_addr, e);
                         }
                     });
@@ -150,6 +163,7 @@ async fn handle_client(
     client_addr: SocketAddr,
     pool: Arc<ProxyPool>,
     config: GatewayConfig,
+    download_mgr: Arc<DownloadManager>,
 ) -> Result<(), GatewayError> {
     configure_tcp_socket(&client_stream, config.buffer_size);
 
@@ -187,6 +201,34 @@ async fn handle_client(
         Some((p, q)) => (p, Some(q)),
         None => (path_or_target, None),
     };
+
+    // Handle CORS preflight
+    if method.eq_ignore_ascii_case("OPTIONS") {
+        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n";
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Read body if Content-Length present (for POST requests)
+    let mut body = Vec::new();
+    if method.eq_ignore_ascii_case("POST") {
+        let mut content_length = 0;
+        for line in header_str.lines() {
+            let lower = line.to_ascii_lowercase();
+            if let Some(val) = lower.strip_prefix("content-length:") {
+                content_length = val.trim().parse::<usize>().unwrap_or(0);
+                break;
+            }
+        }
+        if content_length > 0 {
+            if content_length > 10 * 1024 * 1024 {
+                return Err(GatewayError::InvalidConnectRequest);
+            }
+            body.resize(content_length, 0);
+            client_stream.read_exact(&mut body).await?;
+        }
+    }
 
     // Route 1: Local Live Proxy Feeds (GET /all.txt, GET /live.txt, GET /http.txt, GET /socks4.txt, GET /socks5.txt)
     if method.eq_ignore_ascii_case("GET") && (req_path == "/all.txt" || req_path == "/live.txt") {
@@ -279,22 +321,147 @@ async fn handle_client(
         return Ok(());
     }
 
-    // Route 5: Healthy Proxies Snapshot API (GET /api/proxies, supports ?limit=N)
+    // Route 5: Healthy Proxies Snapshot API (GET /api/proxies, supports ?limit=N and ?proto=socks5|socks4|http|all)
     if method.eq_ignore_ascii_case("GET") && req_path == "/api/proxies" {
-        let limit = req_query.and_then(|q| {
+        let mut limit = None;
+        let mut proto_filter = None;
+
+        if let Some(q) = req_query {
             for param in q.split('&') {
                 if let Some(val) = param.strip_prefix("limit=") {
-                    return val.parse::<usize>().ok();
+                    limit = val.parse::<usize>().ok();
+                } else if let Some(val) = param.strip_prefix("proto=") {
+                    let val_lower = val.to_ascii_lowercase();
+                    match val_lower.as_str() {
+                        "socks5" | "socks5h" => proto_filter = Some(ProxyProto::Socks5),
+                        "socks4" | "socks4a" => proto_filter = Some(ProxyProto::Socks4),
+                        "http" | "https" | "httpconnect" | "connect" => {
+                            proto_filter = Some(ProxyProto::HttpConnect)
+                        }
+                        _ => {} // "all" or unrecognized => None
+                    }
                 }
             }
-            None
-        });
-        let proxies = pool.api_proxies(limit);
+        }
+        let proxies = pool.api_proxies(proto_filter, limit);
         let json_body = serde_json::to_string(&proxies).unwrap_or_else(|_| "[]".to_string());
         let resp = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             json_body.len(),
             json_body
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5a: MEGA URL Inspection API (POST /api/mega/inspect)
+    if method.eq_ignore_ascii_case("POST") && req_path == "/api/mega/inspect" {
+        #[derive(serde::Deserialize)]
+        struct InspectReq {
+            url: String,
+        }
+
+        let resp_str = match serde_json::from_slice::<InspectReq>(&body) {
+            Ok(req) => match download_mgr.inspect(&req.url).await {
+                Ok(res) => {
+                    let json = serde_json::to_string(&res).unwrap_or_else(|_| "{}".to_string());
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        json.len(),
+                        json
+                    )
+                }
+                Err(err) => {
+                    let err_json = serde_json::json!({ "error": err }).to_string();
+                    format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        err_json.len(),
+                        err_json
+                    )
+                }
+            },
+            Err(e) => {
+                let err_json = serde_json::json!({ "error": format!("Invalid JSON request: {}", e) }).to_string();
+                format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    err_json.len(),
+                    err_json
+                )
+            }
+        };
+
+        client_stream.write_all(resp_str.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5b: MEGA Asynchronous Download Task API (POST /api/mega/download)
+    if method.eq_ignore_ascii_case("POST") && req_path == "/api/mega/download" {
+        let resp_str = match serde_json::from_slice::<crate::download::DownloadRequest>(&body) {
+            Ok(req) => match download_mgr.start_download(req).await {
+                Ok(task_id) => {
+                    let json = serde_json::json!({ "task_id": task_id, "status": "started" }).to_string();
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        json.len(),
+                        json
+                    )
+                }
+                Err(err) => {
+                    let err_json = serde_json::json!({ "error": err }).to_string();
+                    format!(
+                        "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        err_json.len(),
+                        err_json
+                    )
+                }
+            },
+            Err(e) => {
+                let err_json = serde_json::json!({ "error": format!("Invalid JSON request: {}", e) }).to_string();
+                format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    err_json.len(),
+                    err_json
+                )
+            }
+        };
+
+        client_stream.write_all(resp_str.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5c: MEGA Active Download Tasks Status API (GET /api/mega/tasks)
+    if method.eq_ignore_ascii_case("GET") && req_path == "/api/mega/tasks" {
+        let tasks = download_mgr.list_tasks().await;
+        let json_body = serde_json::to_string(&tasks).unwrap_or_else(|_| "[]".to_string());
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json_body.len(),
+            json_body
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5d: Cancel MEGA Download Task API (POST /api/mega/tasks/:id/cancel)
+    if method.eq_ignore_ascii_case("POST")
+        && req_path.starts_with("/api/mega/tasks/")
+        && req_path.ends_with("/cancel")
+    {
+        let task_id = req_path
+            .strip_prefix("/api/mega/tasks/")
+            .and_then(|s| s.strip_suffix("/cancel"))
+            .unwrap_or("");
+
+        let success = download_mgr.cancel_task(task_id).await;
+        let json = serde_json::json!({ "success": success }).to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
         );
         client_stream.write_all(resp.as_bytes()).await?;
         client_stream.flush().await?;

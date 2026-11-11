@@ -353,4 +353,42 @@ async fn test_gateway_live_and_status_endpoints() {
     assert!(resp_str6.starts_with("HTTP/1.1 200 OK"));
     assert!(resp_str6.contains("Content-Type: application/json"));
     assert!(resp_str6.contains("192.0.2.1:1080"));
+
+    // 7. Test GET /api/proxies?proto=socks5 (Server-side filtering)
+    let mut client7 = TcpStream::connect(gateway_addr).await.unwrap();
+    client7
+        .write_all(b"GET /api/proxies?proto=socks5 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp_buf7 = vec![0u8; 2048];
+    let n7 = client7.read(&mut resp_buf7).await.unwrap();
+    let resp_str7 = String::from_utf8_lossy(&resp_buf7[..n7]);
+
+    assert!(resp_str7.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str7.contains("\"endpoint\":\"192.0.2.1:1080\""));
+    assert!(!resp_str7.contains("\"endpoint\":\"192.0.2.2:8080\""));
+
+    // 8. Test GET /api/mega/tasks
+    let mut client8 = TcpStream::connect(gateway_addr).await.unwrap();
+    client8
+        .write_all(b"GET /api/mega/tasks HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp_buf8 = vec![0u8; 1024];
+    let n8 = client8.read(&mut resp_buf8).await.unwrap();
+    let resp_str8 = String::from_utf8_lossy(&resp_buf8[..n8]);
+    assert!(resp_str8.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str8.contains("[]"));
+
+    // 9. Test POST /api/mega/inspect (malformed input -> 400 Bad Request)
+    let mut client9 = TcpStream::connect(gateway_addr).await.unwrap();
+    client9
+        .write_all(b"POST /api/mega/inspect HTTP/1.1\r\nHost: localhost\r\nContent-Length: 17\r\n\r\n{\"url\":\"invalid\"}")
+        .await
+        .unwrap();
+    let mut resp_buf9 = vec![0u8; 1024];
+    let n9 = client9.read(&mut resp_buf9).await.unwrap();
+    let resp_str9 = String::from_utf8_lossy(&resp_buf9[..n9]);
+    assert!(resp_str9.starts_with("HTTP/1.1 400 Bad Request"));
+    assert!(resp_str9.contains("\"error\""));
 }

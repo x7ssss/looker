@@ -226,6 +226,22 @@
   ```
 - [x] `looker-gateway/ui`: Modern protocol navigation with interactive pill filters (`[ All ] [ SOCKS5 ] [ SOCKS4 ] [ HTTP ]`) showing live counts, direct table filtering, header export badges (`all.txt`, `socks5.txt`, `socks4.txt`, `http.txt`), and per-protocol status breakdown.
 
+### Phase 8: Proxy Filter Bugfix, Server-Side Pagination, and Web-Based MEGA Downloader UI
+- [x] `looker-pool`: Extended `ProxyPool::api_proxies` to support `proto_filter: Option<ProxyProto>`, filtering healthy nodes before limit and latency sorting.
+- [x] `looker-gateway`: Added server-side protocol query parameter `?proto=socks5|socks4|http|all` to `GET /api/proxies` with case-insensitive parsing.
+- [x] `looker-gateway`: Implemented `DownloadManager` (`crates/looker-gateway/src/download.rs`) tracking background tasks, in-flight progress, dynamic transfer speed (MB/s), ETA calculation, and cancellation via `CancellationToken`.
+- [x] `looker-gateway`: Exposed complete MEGA REST API suite:
+  - `POST /api/mega/inspect`: Accepts `{ "url": "..." }`, resolves single file metadata or recursive folder tree via `looker-mega::fetch_folder_tree`.
+  - `POST /api/mega/download`: Accepts `{ "url": "...", "selected_handles": [...], "output_dir": "..." }`, spawns background multi-worker chunk download tasks routing through local gateway with fallback.
+  - `GET /api/mega/tasks`: Returns active and completed download jobs with real-time transfer metrics.
+  - `POST /api/mega/tasks/:id/cancel`: Cancels running download tasks.
+- [x] `looker-gateway/ui`: Upgraded dashboard with complete MEGA Downloader Studio:
+  - URL input with animated loading spinner.
+  - Interactive file selection card with checkboxes, path and size badges, "Select All" / "Deselect All", and dynamic selection summary.
+  - Output directory selector (`./downloads`).
+  - Active download task cards with animated progress bar, real-time speed, ETA, status pills, and cancellation controls.
+  - Server-side protocol filtering on tab clicks (`/api/proxies?proto=...`).
+
 ---
 
 ## 5. Session Instructions for Future Agents

@@ -18,6 +18,8 @@ rust-embed = { workspace = true }
 tokio-util = { workspace = true }
 looker-protocol = { workspace = true }
 looker-pool = { workspace = true }
+looker-mega = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

@@ -377,15 +377,25 @@ impl ProxyPool {
                 })
                 .collect()
         } else {
-            self.api_proxies(Some(limit))
+            self.api_proxies(None, Some(limit))
         }
     }
 
-    pub fn api_proxies(&self, limit: Option<usize>) -> Vec<ProxyApiItem> {
+    pub fn api_proxies(&self, proto_filter: Option<ProxyProto>, limit: Option<usize>) -> Vec<ProxyApiItem> {
         let items = self.items.read();
         let mut healthy: Vec<Arc<ProxyItem>> = items
             .iter()
-            .filter(|i| i.is_healthy())
+            .filter(|i| {
+                if !i.is_healthy() {
+                    return false;
+                }
+                if let Some(proto) = proto_filter {
+                    if i.proto != proto {
+                        return false;
+                    }
+                }
+                true
+            })
             .map(Arc::clone)
             .collect();
         healthy.sort_by_key(|i| {
@@ -533,5 +543,18 @@ mod tests {
         // Checked conversion
         let checked = pool.healthy_checked();
         assert_eq!(checked.len(), 3);
+
+        // Server-side filtered api_proxies
+        let s5_items = pool.api_proxies(Some(ProxyProto::Socks5), None);
+        assert_eq!(s5_items.len(), 1);
+        assert_eq!(s5_items[0].endpoint, "10.0.0.3:1080");
+        assert_eq!(s5_items[0].proto, "SOCKS5");
+
+        let http_items = pool.api_proxies(Some(ProxyProto::HttpConnect), None);
+        assert_eq!(http_items.len(), 1);
+        assert_eq!(http_items[0].proto, "HTTP");
+
+        let all_items = pool.api_proxies(None, None);
+        assert_eq!(all_items.len(), 3);
     }
 }
