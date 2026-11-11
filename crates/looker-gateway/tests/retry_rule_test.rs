@@ -236,7 +236,7 @@ async fn test_gateway_live_and_status_endpoints() {
     // 4. Test GET /api/proxies
     let mut client4 = TcpStream::connect(gateway_addr).await.unwrap();
     client4
-        .write_all(b"GET /api/proxies HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .write_all(b"GET /api/proxies?limit=10 HTTP/1.1\r\nHost: localhost\r\n\r\n")
         .await
         .unwrap();
 
@@ -247,4 +247,34 @@ async fn test_gateway_live_and_status_endpoints() {
     assert!(resp_str4.starts_with("HTTP/1.1 200 OK"));
     assert!(resp_str4.contains("Content-Type: application/json"));
     assert!(resp_str4.contains("192.0.2.1:1080"));
+
+    // 5. Test GET /api/status
+    let mut client5 = TcpStream::connect(gateway_addr).await.unwrap();
+    client5
+        .write_all(b"GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut resp_buf5 = vec![0u8; 1024];
+    let n5 = client5.read(&mut resp_buf5).await.unwrap();
+    let resp_str5 = String::from_utf8_lossy(&resp_buf5[..n5]);
+
+    assert!(resp_str5.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str5.contains("Content-Type: application/json"));
+    assert!(resp_str5.contains("\"working_count\":1"));
+
+    // 6. Test GET /api/fastest
+    let mut client6 = TcpStream::connect(gateway_addr).await.unwrap();
+    client6
+        .write_all(b"GET /api/fastest HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut resp_buf6 = vec![0u8; 2048];
+    let n6 = client6.read(&mut resp_buf6).await.unwrap();
+    let resp_str6 = String::from_utf8_lossy(&resp_buf6[..n6]);
+
+    assert!(resp_str6.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str6.contains("Content-Type: application/json"));
+    assert!(resp_str6.contains("192.0.2.1:1080"));
 }

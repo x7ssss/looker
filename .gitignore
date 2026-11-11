@@ -1,4 +1,6 @@
 /target
+/out/
+*.looker-resume
 **/*.rs.bk
 *.mmdb
 .idea/

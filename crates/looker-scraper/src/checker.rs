@@ -54,15 +54,19 @@ pub async fn resolve_direct_ip() -> Option<IpAddr> {
 pub struct CheckerConfig {
     pub max_concurrency: usize,
     pub timeout: Duration,
+    pub connect_timeout: Duration,
+    pub total_timeout: Duration,
     pub target_authority: String,
 }
 
 impl Default for CheckerConfig {
     fn default() -> Self {
         Self {
-            max_concurrency: 500,
+            max_concurrency: 512,
             timeout: Duration::from_secs(5),
-            target_authority: "cloudflare.com:443".to_string(),
+            connect_timeout: Duration::from_secs(5),
+            total_timeout: Duration::from_secs(10),
+            target_authority: "ipv4.icanhazip.com:443".to_string(),
         }
     }
 }
@@ -111,94 +115,133 @@ impl ProxyChecker {
             ],
         };
 
+        let conn_timeout = if self.config.connect_timeout.is_zero() {
+            self.config.timeout
+        } else {
+            self.config.connect_timeout
+        };
+
+        let total_timeout = if self.config.total_timeout.is_zero() {
+            Duration::from_secs(10)
+        } else {
+            self.config.total_timeout
+        };
+
         for proto in protocols_to_try {
             let t0 = Instant::now();
 
-            let stream_res = tokio::time::timeout(
-                self.config.timeout,
-                TcpStream::connect(candidate.addr),
-            )
-            .await;
+            let check_fut = async {
+                let stream_res = tokio::time::timeout(
+                    conn_timeout,
+                    TcpStream::connect(candidate.addr),
+                )
+                .await;
 
-            let mut stream = match stream_res {
-                Ok(Ok(s)) => s,
-                _ => continue,
+                let mut stream = match stream_res {
+                    Ok(Ok(s)) => s,
+                    _ => return None,
+                };
+
+                // Configure socket options
+                let _ = stream.set_nodelay(true);
+                let sock = SockRef::from(&stream);
+                let _ = sock.set_send_buffer_size(16384);
+                let _ = sock.set_recv_buffer_size(16384);
+                let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(30));
+                let _ = sock.set_tcp_keepalive(&keepalive);
+
+                let check_res = match proto {
+                    ProxyProto::Socks5 => {
+                        tokio::time::timeout(
+                            conn_timeout,
+                            handshake_socks5(&mut stream, &target),
+                        )
+                        .await
+                        .map(|r| r.map(|_| AnonymityLevel::Elite))
+                    }
+                    ProxyProto::Socks4 => {
+                        tokio::time::timeout(
+                            conn_timeout,
+                            handshake_socks4(&mut stream, &target),
+                        )
+                        .await
+                        .map(|r| r.map(|_| AnonymityLevel::Elite))
+                    }
+                    ProxyProto::HttpConnect => {
+                        let auth = self.config.target_authority.clone();
+                        let dip = self.direct_ip;
+                        tokio::time::timeout(
+                            conn_timeout,
+                            check_http_connect_anonymity(&mut stream, &auth, dip),
+                        )
+                        .await
+                    }
+                };
+
+                if let Ok(Ok(anonymity)) = check_res {
+                    let latency = t0.elapsed();
+                    let exit_ip = candidate.addr.ip();
+                    let geo = self.geo_resolver.lookup(exit_ip);
+                    let geo_opt = if geo.is_empty() { None } else { Some(geo) };
+
+                    debug!(
+                        "Proxy {} verified via {} in {:?} ({})",
+                        candidate.addr, proto, latency, anonymity
+                    );
+
+                    Some(CheckedProxy {
+                        addr: candidate.addr,
+                        proto,
+                        latency,
+                        exit_ip: Some(exit_ip),
+                        anonymity,
+                        geo: geo_opt,
+                    })
+                } else {
+                    None
+                }
             };
 
-            // Configure socket options
-            let _ = stream.set_nodelay(true);
-            let sock = SockRef::from(&stream);
-            let _ = sock.set_send_buffer_size(16384);
-            let _ = sock.set_recv_buffer_size(16384);
-            let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(30));
-            let _ = sock.set_tcp_keepalive(&keepalive);
-
-            let check_res = match proto {
-                ProxyProto::Socks5 => {
-                    tokio::time::timeout(
-                        self.config.timeout,
-                        handshake_socks5(&mut stream, &target),
-                    )
-                    .await
-                    .map(|r| r.map(|_| AnonymityLevel::Elite))
-                }
-                ProxyProto::Socks4 => {
-                    tokio::time::timeout(
-                        self.config.timeout,
-                        handshake_socks4(&mut stream, &target),
-                    )
-                    .await
-                    .map(|r| r.map(|_| AnonymityLevel::Elite))
-                }
-                ProxyProto::HttpConnect => {
-                    let auth = self.config.target_authority.clone();
-                    let dip = self.direct_ip;
-                    tokio::time::timeout(
-                        self.config.timeout,
-                        check_http_connect_anonymity(&mut stream, &auth, dip),
-                    )
-                    .await
-                }
-            };
-
-            if let Ok(Ok(anonymity)) = check_res {
-                let latency = t0.elapsed();
-                let exit_ip = candidate.addr.ip();
-                let geo = self.geo_resolver.lookup(exit_ip);
-                let geo_opt = if geo.is_empty() { None } else { Some(geo) };
-
-                debug!(
-                    "Proxy {} verified via {} in {:?} ({})",
-                    candidate.addr, proto, latency, anonymity
-                );
-
-                return Some(CheckedProxy {
-                    addr: candidate.addr,
-                    proto,
-                    latency,
-                    exit_ip: Some(exit_ip),
-                    anonymity,
-                    geo: geo_opt,
-                });
+            if let Ok(Some(checked)) = tokio::time::timeout(total_timeout, check_fut).await {
+                return Some(checked);
             }
         }
 
         None
     }
 
-    /// Concurrently checks all candidates with bounded concurrency (default 500 in-flight sockets).
-    pub async fn check_all(&self, candidates: Vec<CandidateProxy>) -> Vec<CheckedProxy> {
+    /// Checks all candidates with streaming insertion into the provided ProxyPool.
+    /// Surviving proxies are inserted immediately as they pass validation,
+    /// and progress counters are updated in real time.
+    pub async fn check_all_streaming(
+        &self,
+        candidates: Vec<CandidateProxy>,
+        pool: Arc<looker_pool::ProxyPool>,
+    ) -> Vec<CheckedProxy> {
         info!(
-            "Starting validation pipeline over {} candidates (concurrency limit: {})...",
+            "Starting streaming validation pipeline over {} candidates (concurrency: {})...",
             candidates.len(),
             self.config.max_concurrency
         );
 
+        pool.reset_progress(candidates.len());
+        pool.set_scraping(true);
+
         let mut tasks = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             let checker = Arc::new(self.clone_checker());
+            let pool_clone = Arc::clone(&pool);
+
             tasks.push(tokio::spawn(async move {
-                checker.check_candidate(&candidate).await
+                let res = checker.check_candidate(&candidate).await;
+                pool_clone.inc_checked();
+
+                if let Some(ref checked) = res {
+                    pool_clone.add_or_update(checked.clone());
+                    pool_clone.inc_working();
+                }
+
+                res
             }));
         }
 
@@ -209,8 +252,15 @@ impl ProxyChecker {
             }
         }
 
-        info!("Validation pipeline completed: {} proxies survived", verified.len());
+        pool.set_scraping(false);
+        info!("Streaming validation pipeline completed: {} proxies survived", verified.len());
         verified
+    }
+
+    /// Concurrently checks all candidates with bounded concurrency (default 512 in-flight sockets).
+    pub async fn check_all(&self, candidates: Vec<CandidateProxy>) -> Vec<CheckedProxy> {
+        let temp_pool = Arc::new(looker_pool::ProxyPool::new());
+        self.check_all_streaming(candidates, temp_pool).await
     }
 
     fn clone_checker(&self) -> Self {

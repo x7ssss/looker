@@ -192,6 +192,18 @@
 - [x] Production binary profile tuning in root `Cargo.toml`: `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
 - [x] Cross-platform GitHub Actions release matrix (`.github/workflows/release.yml`): Windows (`x86_64-pc-windows-msvc`), static Linux musl (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` via `cross`), macOS Intel & Apple Silicon (`x86_64-apple-darwin`, `aarch64-apple-darwin`), SHA-256 checksums, and automated GitHub Releases.
 
+### Phase 6: 52 Production Sources, Real-Time Streaming Architecture, and Premium UI Overhaul
+- [x] `looker-scraper`: Ingestion of all 52 verified public endpoints from monosans/proxy-scraper-checker (21 HTTP, 8 SOCKS4, 23 SOCKS5) with concurrency of 24.
+- [x] `looker-scraper`: Replaced batch waiting in `ProxyChecker` with `check_all_streaming` (concurrency 512, connect timeout 5.0s, total timeout 10.0s, target `ipv4.icanhazip.com:443`).
+- [x] `looker-pool`: Real-time streaming proxy insertion (`add_or_update`) as candidate nodes survive verification without blocking on full batch completion.
+- [x] `looker-pool`: Real-time tracking of top-10 lowest-latency surviving proxies (`fastest: Arc<RwLock<Vec<CheckedProxy>>>`).
+- [x] `looker-gateway`: Live REST APIs:
+  - `GET /api/status`: Real-time stats (`total_candidates`, `checked_count`, `working_count`, `quarantined_count`, `avg_latency_ms`, `is_scraping`).
+  - `GET /api/fastest`: Top 10 fastest verified proxies with protocol tags and latency.
+  - `GET /api/proxies`: Healthy proxy registry list supporting `?limit=N`.
+  - `GET /live.txt`: Plain-text proxy stream.
+- [x] `looker-gateway`: High-end dark theme dashboard at `http://127.0.0.1:8080/ui` with auto-refreshing metrics, live progress bar, realtime fastest nodes list, and searchable proxy table.
+
 ---
 
 ## 5. Session Instructions for Future Agents

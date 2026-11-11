@@ -183,8 +183,13 @@ async fn handle_client(
     let method = parts.next().ok_or(GatewayError::InvalidConnectRequest)?;
     let path_or_target = parts.next().ok_or(GatewayError::InvalidConnectRequest)?;
 
+    let (req_path, req_query) = match path_or_target.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (path_or_target, None),
+    };
+
     // Route 1: Local Live Proxy Feed (GET /live.txt)
-    if method.eq_ignore_ascii_case("GET") && path_or_target == "/live.txt" {
+    if method.eq_ignore_ascii_case("GET") && req_path == "/live.txt" {
         let text_feed = pool.export_live_text();
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -197,7 +202,7 @@ async fn handle_client(
     }
 
     // Route 2: Local Status Endpoint (GET /status)
-    if method.eq_ignore_ascii_case("GET") && path_or_target == "/status" {
+    if method.eq_ignore_ascii_case("GET") && req_path == "/status" {
         let stats = pool.stats();
         let json_body = serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string());
         let resp = format!(
@@ -210,10 +215,10 @@ async fn handle_client(
         return Ok(());
     }
 
-    // Route: Proxy Pool Snapshot API (GET /api/proxies)
-    if method.eq_ignore_ascii_case("GET") && path_or_target == "/api/proxies" {
-        let snapshot = pool.snapshot();
-        let json_body = serde_json::to_string(&snapshot).unwrap_or_else(|_| "[]".to_string());
+    // Route 3: Detailed Live Scraper & Pool Status API (GET /api/status)
+    if method.eq_ignore_ascii_case("GET") && req_path == "/api/status" {
+        let api_status = pool.api_status();
+        let json_body = serde_json::to_string(&api_status).unwrap_or_else(|_| "{}".to_string());
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             json_body.len(),
@@ -224,17 +229,53 @@ async fn handle_client(
         return Ok(());
     }
 
-    // Route: Embedded Dashboard UI (GET /ui, GET /ui/*, GET /)
+    // Route 4: Real-time Top-10 Fastest Nodes (GET /api/fastest)
+    if method.eq_ignore_ascii_case("GET") && req_path == "/api/fastest" {
+        let fastest = pool.api_fastest(10);
+        let json_body = serde_json::to_string(&fastest).unwrap_or_else(|_| "[]".to_string());
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json_body.len(),
+            json_body
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5: Healthy Proxies Snapshot API (GET /api/proxies, supports ?limit=N)
+    if method.eq_ignore_ascii_case("GET") && req_path == "/api/proxies" {
+        let limit = req_query.and_then(|q| {
+            for param in q.split('&') {
+                if let Some(val) = param.strip_prefix("limit=") {
+                    return val.parse::<usize>().ok();
+                }
+            }
+            None
+        });
+        let proxies = pool.api_proxies(limit);
+        let json_body = serde_json::to_string(&proxies).unwrap_or_else(|_| "[]".to_string());
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json_body.len(),
+            json_body
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 6: Embedded Dashboard UI (GET /ui, GET /ui/*, GET /)
     if method.eq_ignore_ascii_case("GET")
-        && (path_or_target == "/"
-            || path_or_target == "/ui"
-            || path_or_target == "/ui/"
-            || path_or_target.starts_with("/ui/"))
+        && (req_path == "/"
+            || req_path == "/ui"
+            || req_path == "/ui/"
+            || req_path.starts_with("/ui/"))
     {
-        let rel_path = if path_or_target == "/" || path_or_target == "/ui" || path_or_target == "/ui/" {
+        let rel_path = if req_path == "/" || req_path == "/ui" || req_path == "/ui/" {
             "index.html"
         } else {
-            path_or_target.trim_start_matches("/ui/").trim_start_matches('/')
+            req_path.trim_start_matches("/ui/").trim_start_matches('/')
         };
 
         let file_opt = Asset::get(rel_path).or_else(|| Asset::get("index.html"));

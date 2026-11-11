@@ -8,7 +8,7 @@ use tracing::{debug, info};
 
 use crate::error::ScraperError;
 use crate::extractor::{CandidateExtractor, CandidateProxy};
-use crate::sources::{ProxySource, DEFAULT_SOURCES};
+pub use crate::sources::{ProxySource, DEFAULT_SOURCES};
 
 pub struct ProxyScraper {
     client: Client,
@@ -35,7 +35,7 @@ impl ProxyScraper {
             client,
             extractor: Arc::new(CandidateExtractor::new()),
             sources: DEFAULT_SOURCES.to_vec(),
-            concurrency_limit: 12,
+            concurrency_limit: 24,
         }
     }
 

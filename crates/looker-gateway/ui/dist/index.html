@@ -1,759 +1,219 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="dark">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>LOOKER // Rotating Proxy Gateway & Downloader</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LOOKER // Network Control & Proxy Gateway</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            obsidian: '#09090b',
+            surface: '#121215',
+            panel: '#18181b',
+            stroke: 'rgba(255, 255, 255, 0.08)',
+          },
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          }
+        }
+      }
+    };
+  </script>
   <style>
-    :root {
-      --bg: #09090b;
-      --card-bg: #121215;
-      --card-header: #18181b;
-      --border: #27272a;
-      --border-subtle: #1f1f23;
-      --text: #f4f4f5;
-      --text-muted: #a1a1aa;
-      --text-dim: #71717a;
-      --emerald: #10b981;
-      --emerald-glow: rgba(16, 185, 129, 0.15);
-      --emerald-bright: #34d399;
-      --rose: #f43f5e;
-      --rose-glow: rgba(244, 63, 94, 0.15);
-      --amber: #f59e0b;
-      --amber-glow: rgba(245, 158, 11, 0.15);
-      --blue: #38bdf8;
-      --mono: "SF Mono", Monaco, Inconsolata, "Fira Mono", "Droid Sans Mono", "Source Code Pro", monospace;
-      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
-    }
-
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
-    }
-
-    body {
-      background-color: var(--bg);
-      color: var(--text);
-      font-family: var(--sans);
-      min-height: 100vh;
-      display: flex;
-      flex-direction: column;
-      line-height: 1.5;
-      -webkit-font-smoothing: antialiased;
-    }
-
-    header {
-      background: var(--card-header);
-      border-bottom: 1px solid var(--border);
-      padding: 1rem 1.5rem;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      position: sticky;
-      top: 0;
-      z-index: 50;
-    }
-
-    .brand {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-    }
-
-    .logo-badge {
-      background: linear-gradient(135deg, #059669 0%, #10b981 100%);
-      color: #000;
-      font-weight: 900;
-      font-family: var(--mono);
-      font-size: 0.875rem;
-      padding: 0.25rem 0.5rem;
-      border-radius: 4px;
-      letter-spacing: 0.05em;
-    }
-
-    .brand-title {
-      font-size: 1.125rem;
-      font-weight: 700;
-      letter-spacing: -0.02em;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .version-tag {
-      font-size: 0.75rem;
-      font-family: var(--mono);
-      color: var(--text-muted);
-      background: var(--border-subtle);
-      border: 1px solid var(--border);
-      padding: 0.1rem 0.4rem;
-      border-radius: 4px;
-    }
-
-    .header-actions {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-    }
-
-    .status-pill {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      background: rgba(16, 185, 129, 0.1);
-      border: 1px solid rgba(16, 185, 129, 0.3);
-      color: var(--emerald-bright);
-      padding: 0.25rem 0.75rem;
-      border-radius: 9999px;
-      font-family: var(--mono);
-      font-size: 0.75rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-
-    .pulsing-dot {
-      width: 8px;
-      height: 8px;
-      background-color: var(--emerald-bright);
-      border-radius: 50%;
-      box-shadow: 0 0 8px var(--emerald);
-      animation: pulse 2s infinite ease-in-out;
-    }
-
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.4; transform: scale(0.85); }
-    }
-
-    .container {
-      max-width: 1400px;
-      width: 100%;
-      margin: 0 auto;
-      padding: 1.5rem;
-      display: flex;
-      flex-direction: column;
-      gap: 1.5rem;
-    }
-
-    .stats-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 1rem;
-    }
-
-    .stat-card {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1.25rem;
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-      position: relative;
-      overflow: hidden;
-    }
-
-    .stat-card::before {
-      content: "";
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 2px;
-      background: var(--border);
-    }
-
-    .stat-card.emerald::before { background: var(--emerald); }
-    .stat-card.rose::before { background: var(--rose); }
-    .stat-card.amber::before { background: var(--amber); }
-    .stat-card.blue::before { background: var(--blue); }
-
-    .stat-label {
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      font-weight: 600;
-      color: var(--text-muted);
-      letter-spacing: 0.05em;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }
-
-    .stat-value {
-      font-family: var(--mono);
-      font-size: 2rem;
-      font-weight: 700;
-      letter-spacing: -0.03em;
-      color: var(--text);
-    }
-
-    .stat-subtext {
-      font-size: 0.75rem;
-      color: var(--text-dim);
-      font-family: var(--mono);
-    }
-
-    .panel {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      overflow: hidden;
-    }
-
-    .panel-header {
-      background: var(--card-header);
-      padding: 0.875rem 1.25rem;
-      border-bottom: 1px solid var(--border);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      flex-wrap: wrap;
-      gap: 0.75rem;
-    }
-
-    .panel-title {
-      font-size: 0.875rem;
-      font-weight: 600;
-      letter-spacing: -0.01em;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .quick-tools {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1.5rem;
-    }
-
-    @media (max-width: 900px) {
-      .quick-tools { grid-template-columns: 1fr; }
-    }
-
-    .tool-box {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1.25rem;
-      display: flex;
-      flex-direction: column;
-      gap: 1rem;
-    }
-
-    .tool-box h3 {
-      font-size: 0.9375rem;
-      font-weight: 600;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-
-    .code-box {
-      background: #000;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 0.75rem 1rem;
-      font-family: var(--mono);
-      font-size: 0.8125rem;
-      color: var(--emerald-bright);
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      word-break: break-all;
-    }
-
-    .btn {
-      background: var(--card-header);
-      border: 1px solid var(--border);
-      color: var(--text);
-      padding: 0.4rem 0.75rem;
-      border-radius: 6px;
-      font-size: 0.75rem;
-      font-weight: 500;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-      transition: all 0.15s ease;
-      white-space: nowrap;
-      text-decoration: none;
-    }
-
-    .btn:hover {
-      background: var(--border);
-      border-color: var(--text-dim);
-    }
-
-    .btn-emerald {
-      background: #064e3b;
-      border-color: #059669;
-      color: #6ee7b7;
-    }
-
-    .btn-emerald:hover {
-      background: #047857;
-      border-color: var(--emerald);
-      color: #fff;
-    }
-
-    .input-group {
-      display: flex;
-      gap: 0.5rem;
-    }
-
-    .input {
-      flex: 1;
-      background: #000;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 0.5rem 0.75rem;
-      color: var(--text);
-      font-family: var(--mono);
-      font-size: 0.8125rem;
-      outline: none;
-    }
-
-    .input:focus {
-      border-color: var(--emerald);
-    }
-
-    .table-container {
-      overflow-x: auto;
-      max-height: 520px;
-    }
-
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.8125rem;
-      text-align: left;
-    }
-
-    th {
-      background: var(--card-header);
-      padding: 0.75rem 1rem;
-      color: var(--text-muted);
-      font-weight: 600;
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      border-bottom: 1px solid var(--border);
-      position: sticky;
-      top: 0;
-      z-index: 10;
-    }
-
-    td {
-      padding: 0.75rem 1rem;
-      border-bottom: 1px solid var(--border-subtle);
-      font-family: var(--mono);
-    }
-
-    tr:hover td {
-      background: rgba(255, 255, 255, 0.02);
-    }
-
-    .badge {
-      display: inline-flex;
-      align-items: center;
-      padding: 0.15rem 0.5rem;
-      border-radius: 4px;
-      font-size: 0.6875rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-
-    .badge-socks5 { background: rgba(56, 189, 248, 0.15); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.3); }
-    .badge-socks4 { background: rgba(168, 85, 247, 0.15); color: #c084fc; border: 1px solid rgba(168, 85, 247, 0.3); }
-    .badge-http { background: rgba(251, 191, 36, 0.15); color: #fbbf24; border: 1px solid rgba(251, 191, 36, 0.3); }
-
-    .badge-healthy { background: var(--emerald-glow); color: var(--emerald-bright); border: 1px solid rgba(16, 185, 129, 0.4); }
-    .badge-quarantined { background: var(--rose-glow); color: var(--rose); border: 1px solid rgba(244, 63, 94, 0.4); }
-
-    .badge-elite { background: rgba(16, 185, 129, 0.1); color: var(--emerald-bright); }
-    .badge-anonymous { background: rgba(56, 189, 248, 0.1); color: var(--blue); }
-    .badge-transparent { background: rgba(245, 158, 11, 0.1); color: var(--amber); }
-
-    .latency-bar-container {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      width: 140px;
-    }
-
-    .latency-bar {
-      flex: 1;
-      height: 4px;
-      background: var(--border);
-      border-radius: 2px;
-      overflow: hidden;
-    }
-
-    .latency-fill {
-      height: 100%;
-      border-radius: 2px;
-    }
-
-    .filter-bar {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-
-    .filter-btn {
-      background: transparent;
-      border: 1px solid var(--border);
-      color: var(--text-muted);
-      padding: 0.25rem 0.6rem;
-      border-radius: 4px;
-      font-size: 0.75rem;
-      cursor: pointer;
-      font-family: var(--mono);
-    }
-
-    .filter-btn.active {
-      background: var(--border);
-      color: var(--text);
-      border-color: var(--emerald);
-    }
-
-    footer {
-      margin-top: auto;
-      border-top: 1px solid var(--border);
-      padding: 1rem 1.5rem;
-      text-align: center;
-      font-size: 0.75rem;
-      color: var(--text-dim);
-      font-family: var(--mono);
-    }
+    body { background-color: #09090b; color: #f4f4f5; font-family: 'Inter', sans-serif; }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+    .pulse-dot { animation: pulse 2s infinite ease-in-out; }
+    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.9); } }
   </style>
 </head>
-<body>
-  <header>
-    <div class="brand">
-      <div class="logo-badge">LK</div>
-      <div class="brand-title">
-        LOOKER
-        <span class="version-tag">v0.1.0</span>
+<body class="min-h-screen antialiased flex flex-col justify-between selection:bg-emerald-500/20 selection:text-emerald-300">
+  <div class="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 space-y-6">
+    <!-- Header -->
+    <header class="flex flex-wrap items-center justify-between gap-4 pb-6 border-b border-stroke">
+      <div class="flex items-center gap-3">
+        <div class="h-9 w-9 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold mono text-sm">LK</div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-base font-semibold tracking-tight text-white">LOOKER</h1>
+            <span class="text-[10px] mono px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-zinc-400">v0.1.0</span>
+          </div>
+          <p class="text-xs text-zinc-500">Autonomous Proxy Scraper & Gateway Daemon</p>
+        </div>
       </div>
-    </div>
-    <div class="header-actions">
-      <div class="status-pill">
-        <span class="pulsing-dot"></span>
-        Gateway Active
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium">
+          <span class="h-2 w-2 rounded-full bg-emerald-400 pulse-dot"></span>
+          <span id="gateway-status">GATEWAY ONLINE (127.0.0.1:8080)</span>
+        </div>
+        <a href="/live.txt" target="_blank" class="px-3 py-1.5 rounded-lg border border-stroke bg-surface hover:bg-panel text-xs text-zinc-300 transition-colors mono">live.txt</a>
       </div>
-      <a href="/live.txt" target="_blank" class="btn">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        live.txt
-      </a>
-      <a href="/status" target="_blank" class="btn">JSON</a>
-    </div>
-  </header>
+    </header>
 
-  <div class="container">
-    <!-- STATS OVERVIEW -->
-    <div class="stats-grid">
-      <div class="stat-card emerald">
-        <div class="stat-label">
-          <span>Healthy Proxies</span>
-          <span style="color: var(--emerald-bright)">&#9679;</span>
-        </div>
-        <div class="stat-value" id="stat-healthy">--</div>
-        <div class="stat-subtext" id="stat-healthy-pct">Ready for routing</div>
+    <!-- Metrics Row -->
+    <section class="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div class="p-4 rounded-xl border border-stroke bg-surface">
+        <span class="text-[11px] font-medium text-zinc-400">Healthy Proxies</span>
+        <div class="text-3xl font-bold mono text-emerald-400 mt-2" id="metric-healthy">0</div>
+        <p class="text-[10px] text-zinc-500 mt-1">Ready for in-flight routing</p>
       </div>
-      <div class="stat-card blue">
-        <div class="stat-label">
-          <span>Total In Registry</span>
-          <span>&#9632;</span>
+      <div class="p-4 rounded-xl border border-stroke bg-surface">
+        <div class="flex items-center justify-between">
+          <span class="text-[11px] font-medium text-zinc-400">Checking Progress</span>
+          <span class="text-[10px] mono text-zinc-500" id="progress-percent">0%</span>
         </div>
-        <div class="stat-value" id="stat-total">--</div>
-        <div class="stat-subtext" id="stat-total-sub">Total validated candidates</div>
-      </div>
-      <div class="stat-card rose">
-        <div class="stat-label">
-          <span>Quarantined / Cooldown</span>
-          <span style="color: var(--rose)">&#9660;</span>
+        <div class="flex items-baseline gap-1 mt-2">
+          <span class="text-3xl font-bold mono text-white" id="metric-checked">0</span>
+          <span class="text-xs text-zinc-500 mono">/ <span id="metric-total">0</span></span>
         </div>
-        <div class="stat-value" id="stat-quarantined">--</div>
-        <div class="stat-subtext">Tripped circuit breaker</div>
-      </div>
-      <div class="stat-card amber">
-        <div class="stat-label">
-          <span>Avg EMA Latency</span>
-          <span>&#9889;</span>
+        <div class="w-full bg-white/5 rounded-full h-1 mt-2 overflow-hidden">
+          <div class="bg-emerald-400 h-full rounded-full transition-all duration-300" id="progress-bar" style="width: 0%"></div>
         </div>
-        <div class="stat-value" id="stat-latency">--<span style="font-size: 1rem">ms</span></div>
-        <div class="stat-subtext">Weighted response time</div>
       </div>
-      <div class="stat-card">
-        <div class="stat-label">
-          <span>Tunnel Requests</span>
-          <span>&#8644;</span>
+      <div class="p-4 rounded-xl border border-stroke bg-surface">
+        <span class="text-[11px] font-medium text-zinc-400">Average Latency</span>
+        <div class="flex items-baseline gap-1 mt-2">
+          <span class="text-3xl font-bold mono text-amber-400" id="metric-latency">0</span>
+          <span class="text-xs text-zinc-500 mono">ms</span>
         </div>
-        <div class="stat-value" id="stat-requests">--</div>
-        <div class="stat-subtext">Through local gateway</div>
+        <p class="text-[10px] text-zinc-500 mt-1">Monotonic full roundtrip</p>
       </div>
-    </div>
+      <div class="p-4 rounded-xl border border-stroke bg-surface">
+        <span class="text-[11px] font-medium text-zinc-400">Quarantined</span>
+        <div class="text-3xl font-bold mono text-rose-400 mt-2" id="metric-quarantined">0</div>
+        <p class="text-[10px] text-zinc-500 mt-1">Tripped circuit breaker</p>
+      </div>
+    </section>
 
-    <!-- QUICK TOOLS -->
-    <div class="quick-tools">
-      <div class="tool-box">
-        <h3>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-          Rotating Gateway Tunnel
-        </h3>
-        <p style="font-size: 0.8125rem; color: var(--text-muted)">
-          Configure client tools (curl, yt-dlp, browser) to use Looker's zero-install local forwarder. Upstream proxies rotate transparently with pre-commit retries.
-        </p>
-        <div class="code-box">
-          <span id="proxy-endpoint">http://127.0.0.1:8080</span>
-          <button class="btn" onclick="copyText('http://127.0.0.1:8080', this)">Copy</button>
+    <!-- Main Content: Fastest Nodes & Table -->
+    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+      <!-- Fastest Proxies Card -->
+      <section class="p-5 rounded-xl border border-stroke bg-surface space-y-4">
+        <div class="flex items-center justify-between">
+          <h2 class="text-xs font-semibold text-zinc-200 uppercase tracking-wider">Fastest Surviving Nodes</h2>
+          <span class="text-[10px] mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded">REALTIME</span>
         </div>
-        <div class="code-box" style="font-size: 0.75rem; color: #a1a1aa">
-          <span>curl -x http://127.0.0.1:8080 https://cloudflare.com/cdn-cgi/trace</span>
-          <button class="btn" onclick="copyText('curl -x http://127.0.0.1:8080 https://cloudflare.com/cdn-cgi/trace', this)">Copy</button>
+        <div class="space-y-2" id="fastest-list">
+          <p class="text-xs text-zinc-500 py-4 text-center">Checking candidate endpoints...</p>
         </div>
-      </div>
+        <div class="pt-3 border-t border-stroke space-y-2">
+          <span class="text-[11px] font-medium text-zinc-400">Downloader Command Helper</span>
+          <div class="p-2.5 rounded-lg bg-obsidian border border-stroke font-mono text-[11px] text-emerald-400 flex items-center justify-between gap-2 overflow-x-auto">
+            <span class="truncate">looker-down &lt;MEGA_URL&gt;</span>
+            <button onclick="navigator.clipboard.writeText('looker-down ')" class="text-xs text-zinc-400 hover:text-white transition-colors">Copy</button>
+          </div>
+        </div>
+      </section>
 
-      <div class="tool-box">
-        <h3>
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          looker-down Helper
-        </h3>
-        <p style="font-size: 0.8125rem; color: var(--text-muted)">
-          Paste any MEGA file or public folder URL to generate high-speed chunked download command:
-        </p>
-        <div class="input-group">
-          <input type="text" class="input" id="mega-url-input" placeholder="https://mega.nz/folder/... or https://mega.nz/file/..." oninput="updateDownloadCommand()">
+      <!-- Main Proxy Table -->
+      <section class="lg:col-span-2 p-5 rounded-xl border border-stroke bg-surface space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <h2 class="text-xs font-semibold text-zinc-200 uppercase tracking-wider">Surviving Proxy Pool</h2>
+          <input type="text" id="search-box" placeholder="Filter by IP, Country, Protocol..." class="px-3 py-1.5 rounded-lg bg-obsidian border border-stroke text-xs text-zinc-300 placeholder-zinc-600 outline-none focus:border-emerald-500/50 w-64 transition-colors" />
         </div>
-        <div class="code-box">
-          <span id="cmd-preview">looker-down &lt;URL&gt; --workers 16</span>
-          <button class="btn btn-emerald" onclick="copyText(document.getElementById('cmd-preview').innerText, this)">Copy Command</button>
+        <div class="overflow-x-auto max-h-[460px] overflow-y-auto">
+          <table class="w-full text-left text-xs">
+            <thead class="sticky top-0 bg-surface border-b border-stroke text-zinc-400 font-medium">
+              <tr>
+                <th class="pb-2">Endpoint</th>
+                <th class="pb-2">Protocol</th>
+                <th class="pb-2">Country</th>
+                <th class="pb-2">Latency</th>
+                <th class="pb-2">Anonymity</th>
+              </tr>
+            </thead>
+            <tbody id="proxy-table-body" class="divide-y divide-white/[0.04] text-zinc-300">
+              <tr><td colspan="5" class="py-8 text-center text-zinc-500">Awaiting stream from checking engine...</td></tr>
+            </tbody>
+          </table>
         </div>
-      </div>
-    </div>
-
-    <!-- PROXY POOL REGISTRY -->
-    <div class="panel">
-      <div class="panel-header">
-        <div class="panel-title">
-          <span>Active Proxy Registry</span>
-          <span class="version-tag" id="table-count">0 items</span>
-        </div>
-        <div class="filter-bar">
-          <input type="text" class="input" style="padding: 0.25rem 0.5rem; width: 180px" id="search-input" placeholder="Filter IP / Geo..." oninput="filterProxies()">
-          <button class="filter-btn active" data-filter="all" onclick="setFilter(this, 'all')">All</button>
-          <button class="filter-btn" data-filter="socks5" onclick="setFilter(this, 'socks5')">SOCKS5</button>
-          <button class="filter-btn" data-filter="socks4" onclick="setFilter(this, 'socks4')">SOCKS4</button>
-          <button class="filter-btn" data-filter="http" onclick="setFilter(this, 'http')">HTTP</button>
-          <button class="btn" onclick="fetchData()" id="refresh-btn">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-            Refresh
-          </button>
-        </div>
-      </div>
-
-      <div class="table-container">
-        <table>
-          <thead>
-            <tr>
-              <th>Proxy Endpoint</th>
-              <th>Protocol</th>
-              <th>Anonymity</th>
-              <th>Location</th>
-              <th>EMA Latency</th>
-              <th>Circuit Status</th>
-              <th>Success / Total</th>
-            </tr>
-          </thead>
-          <tbody id="proxy-tbody">
-            <tr>
-              <td colspan="7" style="text-align: center; color: var(--text-dim); padding: 2rem;">
-                Connecting to Looker Gateway status feed...
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      </section>
     </div>
   </div>
 
-  <footer>
-    LOOKER // High-Performance Rotating Proxy Gateway & Downloader &bull; Built with Rust & Tokio
+  <footer class="max-w-7xl mx-auto w-full px-4 py-4 text-center border-t border-stroke text-[11px] text-zinc-600 mono">
+    LOOKER // HIGH-PERFORMANCE PROXY DAEMON & MEGA ENGINE • 127.0.0.1:8080
   </footer>
 
   <script>
     let allProxies = [];
-    let currentProtoFilter = 'all';
-
-    async function fetchData() {
-      const btn = document.getElementById('refresh-btn');
-      if (btn) btn.style.opacity = '0.5';
-
+    async function fetchStatus() {
       try {
-        // 1. Fetch overall pool stats
-        const statsRes = await fetch('/status');
-        if (statsRes.ok) {
-          const stats = await statsRes.json();
-          document.getElementById('stat-healthy').innerText = stats.healthy_proxies || 0;
-          document.getElementById('stat-total').innerText = stats.total_proxies || 0;
-          document.getElementById('stat-quarantined').innerText = stats.quarantined_proxies || 0;
-          document.getElementById('stat-latency').innerHTML = `${stats.avg_latency_ms || 0}<span style="font-size: 1rem">ms</span>`;
-          document.getElementById('stat-requests').innerText = stats.total_requests || 0;
+        const res = await fetch('/api/status');
+        if (!res.ok) return;
+        const d = await res.json();
+        document.getElementById('metric-healthy').textContent = d.working_count || 0;
+        document.getElementById('metric-checked').textContent = d.checked_count || 0;
+        document.getElementById('metric-total').textContent = d.total_candidates || 0;
+        document.getElementById('metric-latency').textContent = d.avg_latency_ms || 0;
+        document.getElementById('metric-quarantined').textContent = d.quarantined_count || 0;
+        const pct = d.total_candidates > 0 ? Math.min(100, Math.round((d.checked_count / d.total_candidates) * 100)) : 0;
+        document.getElementById('progress-percent').textContent = pct + '%';
+        document.getElementById('progress-bar').style.width = pct + '%';
+      } catch (e) {}
+    }
 
-          if (stats.total_proxies > 0) {
-            const pct = Math.round((stats.healthy_proxies / stats.total_proxies) * 100);
-            document.getElementById('stat-healthy-pct').innerText = `${pct}% pool availability`;
-          }
-        }
+    async function fetchFastest() {
+      try {
+        const res = await fetch('/api/fastest');
+        if (!res.ok) return;
+        const list = await res.json();
+        const container = document.getElementById('fastest-list');
+        if (!list || list.length === 0) return;
+        container.innerHTML = list.map(p => `
+          <div class="flex items-center justify-between p-2 rounded-lg bg-obsidian border border-stroke text-xs">
+            <div class="flex items-center gap-2">
+              <span class="mono text-zinc-200">${p.endpoint}</span>
+              <span class="px-1.5 py-0.5 rounded text-[10px] mono ${p.proto === 'SOCKS5' ? 'bg-violet-500/10 text-violet-400' : 'bg-blue-500/10 text-blue-400'}">${p.proto}</span>
+            </div>
+            <span class="mono text-emerald-400 font-medium">${p.latency_ms}ms</span>
+          </div>
+        `).join('');
+      } catch (e) {}
+    }
 
-        // 2. Try fetching detailed snapshot if available, or parse /live.txt
-        let loadedSnapshot = false;
-        try {
-          const snapRes = await fetch('/api/proxies');
-          if (snapRes.ok) {
-            allProxies = await snapRes.json();
-            loadedSnapshot = true;
-          }
-        } catch (_) {}
-
-        if (!loadedSnapshot) {
-          // Fallback: parse /live.txt into items
-          const liveRes = await fetch('/live.txt');
-          if (liveRes.ok) {
-            const text = await liveRes.text();
-            const lines = text.trim().split('\n').filter(l => l.length > 0);
-            allProxies = lines.map(line => {
-              const parts = line.split('://');
-              const proto = parts.length > 1 ? parts[0] : 'http';
-              const addr = parts.length > 1 ? parts[1] : parts[0];
-              return {
-                addr: addr,
-                proto: proto,
-                latency_ms: 0,
-                healthy: true,
-                consecutive_failures: 0,
-                total_requests: 0,
-                successful_requests: 0,
-                anonymity: 'elite',
-                exit_ip: null,
-                geo: null
-              };
-            });
-          }
-        }
-
+    async function fetchProxies() {
+      try {
+        const res = await fetch('/api/proxies?limit=100');
+        if (!res.ok) return;
+        allProxies = await res.json();
         renderTable();
-      } catch (err) {
-        console.error("Failed to fetch gateway status:", err);
-      } finally {
-        if (btn) btn.style.opacity = '1';
-      }
-    }
-
-    function setFilter(el, proto) {
-      document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-      el.classList.add('active');
-      currentProtoFilter = proto;
-      renderTable();
-    }
-
-    function filterProxies() {
-      renderTable();
+      } catch (e) {}
     }
 
     function renderTable() {
-      const tbody = document.getElementById('proxy-tbody');
-      const searchQuery = (document.getElementById('search-input')?.value || '').toLowerCase();
-
-      const filtered = allProxies.filter(p => {
-        const protoMatches = currentProtoFilter === 'all' || p.proto.toLowerCase() === currentProtoFilter;
-        if (!protoMatches) return false;
-
-        if (!searchQuery) return true;
-
-        const addrStr = p.addr.toLowerCase();
-        const country = (p.geo?.country_code || '').toLowerCase();
-        const city = (p.geo?.city || '').toLowerCase();
-        const org = (p.geo?.asn_org || '').toLowerCase();
-        return addrStr.includes(searchQuery) || country.includes(searchQuery) || city.includes(searchQuery) || org.includes(searchQuery);
-      });
-
-      document.getElementById('table-count').innerText = `${filtered.length} nodes`;
-
+      const q = document.getElementById('search-box').value.toLowerCase();
+      const filtered = allProxies.filter(p => p.endpoint.toLowerCase().includes(q) || (p.country && p.country.toLowerCase().includes(q)) || p.proto.toLowerCase().includes(q));
+      const tbody = document.getElementById('proxy-table-body');
       if (filtered.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="7" style="text-align: center; color: var(--text-dim); padding: 2rem;">No matching proxies found.</td></tr>`;
+        tbody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-zinc-500">No matching proxies</td></tr>';
         return;
       }
-
-      tbody.innerHTML = filtered.map(p => {
-        const protoClass = p.proto.toLowerCase() === 'socks5' ? 'badge-socks5' : (p.proto.toLowerCase() === 'socks4' ? 'badge-socks4' : 'badge-http');
-        const anonClass = p.anonymity === 'transparent' ? 'badge-transparent' : (p.anonymity === 'anonymous' ? 'badge-anonymous' : 'badge-elite');
-        const statusClass = p.healthy ? 'badge-healthy' : 'badge-quarantined';
-        const statusText = p.healthy ? 'HEALTHY' : 'QUARANTINE';
-
-        const lat = p.latency_ms || 0;
-        let latColor = '#10b981';
-        if (lat > 600) latColor = '#f43f5e';
-        else if (lat > 250) latColor = '#f59e0b';
-        const fillWidth = Math.min(100, Math.max(5, Math.round((lat / 1000) * 100)));
-
-        let location = '--';
-        if (p.geo && p.geo.country_code) {
-          location = `${p.geo.country_code} &bull; ${p.geo.city || 'Unknown'}`;
-          if (p.geo.asn) location += ` (AS${p.geo.asn})`;
-        }
-
-        return `
-          <tr>
-            <td><strong>${p.addr}</strong></td>
-            <td><span class="badge ${protoClass}">${p.proto.toUpperCase()}</span></td>
-            <td><span class="badge ${anonClass}">${p.anonymity || 'ELITE'}</span></td>
-            <td style="color: var(--text-muted)">${location}</td>
-            <td>
-              <div class="latency-bar-container">
-                <span style="color: ${latColor}; width: 50px">${lat > 0 ? lat + 'ms' : 'fast'}</span>
-                <div class="latency-bar">
-                  <div class="latency-fill" style="width: ${fillWidth}%; background-color: ${latColor};"></div>
-                </div>
-              </div>
-            </td>
-            <td><span class="badge ${statusClass}">${statusText}</span></td>
-            <td style="color: var(--text-muted)">${p.successful_requests || 0} / ${p.total_requests || 0}</td>
-          </tr>
-        `;
-      }).join('');
+      tbody.innerHTML = filtered.slice(0, 50).map(p => `
+        <tr class="hover:bg-white/[0.02]">
+          <td class="py-2.5 mono text-zinc-200">${p.endpoint}</td>
+          <td class="py-2.5"><span class="px-1.5 py-0.5 rounded text-[10px] mono bg-white/5 border border-white/10 text-zinc-300">${p.proto}</span></td>
+          <td class="py-2.5 text-zinc-400">${p.country || '—'}</td>
+          <td class="py-2.5 mono ${p.latency_ms < 1000 ? 'text-emerald-400' : 'text-amber-400'}">${p.latency_ms}ms</td>
+          <td class="py-2.5 text-zinc-400 text-[11px]">${p.anonymity || 'Elite'}</td>
+        </tr>
+      `).join('');
     }
 
-    function updateDownloadCommand() {
-      const val = document.getElementById('mega-url-input').value.trim();
-      const preview = document.getElementById('cmd-preview');
-      if (val) {
-        preview.innerText = `looker-down "${val}" --workers 16`;
-      } else {
-        preview.innerText = `looker-down <URL> --workers 16`;
-      }
-    }
-
-    function copyText(text, btn) {
-      navigator.clipboard.writeText(text).then(() => {
-        const orig = btn.innerText;
-        btn.innerText = 'Copied!';
-        btn.style.color = '#34d399';
-        setTimeout(() => {
-          btn.innerText = orig;
-          btn.style.color = '';
-        }, 1500);
-      });
-    }
-
-    // Auto refresh every 2.5s
-    fetchData();
-    setInterval(fetchData, 2500);
+    document.getElementById('search-box').addEventListener('input', renderTable);
+    setInterval(fetchStatus, 1500);
+    setInterval(fetchFastest, 2000);
+    setInterval(fetchProxies, 3000);
+    fetchStatus();
+    fetchFastest();
+    fetchProxies();
   </script>
 </body>
 </html>

@@ -28,10 +28,34 @@ pub struct PoolStats {
     pub total_requests: u64,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ApiStatus {
+    pub total_candidates: usize,
+    pub checked_count: usize,
+    pub working_count: usize,
+    pub quarantined_count: usize,
+    pub avg_latency_ms: u64,
+    pub is_scraping: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProxyApiItem {
+    pub endpoint: String,
+    pub proto: String,
+    pub latency_ms: u64,
+    pub country: Option<String>,
+    pub anonymity: String,
+}
+
 pub struct ProxyPool {
     items: RwLock<Vec<Arc<ProxyItem>>>,
+    fastest: Arc<RwLock<Vec<CheckedProxy>>>,
     rr_index: AtomicUsize,
     default_cooldown: Duration,
+    total_candidates: AtomicUsize,
+    checked_count: AtomicUsize,
+    working_count: AtomicUsize,
+    is_scraping: std::sync::atomic::AtomicBool,
 }
 
 impl Default for ProxyPool {
@@ -44,8 +68,13 @@ impl ProxyPool {
     pub fn new() -> Self {
         Self {
             items: RwLock::new(Vec::new()),
+            fastest: Arc::new(RwLock::new(Vec::new())),
             rr_index: AtomicUsize::new(0),
             default_cooldown: Duration::from_secs(60),
+            total_candidates: AtomicUsize::new(0),
+            checked_count: AtomicUsize::new(0),
+            working_count: AtomicUsize::new(0),
+            is_scraping: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -58,6 +87,14 @@ impl ProxyPool {
     /// If existing, updates latency (EMA), resets consecutive failures, and marks healthy.
     /// If new, registers the proxy in the active pool.
     pub fn add_or_update(&self, proxy: CheckedProxy) {
+        {
+            let mut fastest = self.fastest.write();
+            fastest.retain(|p| !(p.addr == proxy.addr && p.proto == proxy.proto));
+            fastest.push(proxy.clone());
+            fastest.sort_by_key(|p| p.latency);
+            fastest.truncate(10);
+        }
+
         let mut items = self.items.write();
         if let Some(existing) = items
             .iter()
@@ -78,6 +115,11 @@ impl ProxyPool {
             );
             items.push(Arc::new(item));
         }
+
+        self.working_count.store(
+            items.iter().filter(|i| i.is_healthy()).count(),
+            Ordering::Relaxed,
+        );
     }
 
     /// Backwards-compatible simple registration.
@@ -245,6 +287,97 @@ impl ProxyPool {
             quarantined_proxies: quarantined,
             avg_latency_ms,
             total_requests,
+        }
+    }
+
+    pub fn set_scraping(&self, val: bool) {
+        self.is_scraping.store(val, Ordering::Relaxed);
+    }
+
+    pub fn reset_progress(&self, total_candidates: usize) {
+        self.total_candidates.store(total_candidates, Ordering::Relaxed);
+        self.checked_count.store(0, Ordering::Relaxed);
+        self.working_count.store(self.healthy_count(), Ordering::Relaxed);
+    }
+
+    pub fn inc_checked(&self) {
+        self.checked_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_working(&self) {
+        self.working_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn fastest_proxies(&self, limit: usize) -> Vec<CheckedProxy> {
+        let fastest = self.fastest.read();
+        fastest.iter().take(limit).cloned().collect()
+    }
+
+    pub fn api_fastest(&self, limit: usize) -> Vec<ProxyApiItem> {
+        let fastest = self.fastest.read();
+        if !fastest.is_empty() {
+            fastest
+                .iter()
+                .take(limit)
+                .map(|p| ProxyApiItem {
+                    endpoint: p.addr.to_string(),
+                    proto: p.proto.to_string().to_uppercase(),
+                    latency_ms: p.latency.as_millis() as u64,
+                    country: p.geo.as_ref().and_then(|g| g.country_code.clone()),
+                    anonymity: match p.anonymity {
+                        AnonymityLevel::Elite => "Elite".to_string(),
+                        AnonymityLevel::Anonymous => "Anonymous".to_string(),
+                        AnonymityLevel::Transparent => "Transparent".to_string(),
+                    },
+                })
+                .collect()
+        } else {
+            self.api_proxies(Some(limit))
+        }
+    }
+
+    pub fn api_proxies(&self, limit: Option<usize>) -> Vec<ProxyApiItem> {
+        let items = self.items.read();
+        let mut healthy: Vec<Arc<ProxyItem>> = items
+            .iter()
+            .filter(|i| i.is_healthy())
+            .map(Arc::clone)
+            .collect();
+        healthy.sort_by_key(|i| {
+            let ms = i.latency_ms.load(Ordering::Relaxed);
+            if ms == 0 {
+                99999
+            } else {
+                ms
+            }
+        });
+        let take_count = limit.unwrap_or(healthy.len());
+        healthy
+            .iter()
+            .take(take_count)
+            .map(|item| ProxyApiItem {
+                endpoint: item.addr.to_string(),
+                proto: item.proto.to_string().to_uppercase(),
+                latency_ms: item.latency_ms.load(Ordering::Relaxed),
+                country: item.geo.as_ref().and_then(|g| g.country_code.clone()),
+                anonymity: match item.anonymity {
+                    AnonymityLevel::Elite => "Elite".to_string(),
+                    AnonymityLevel::Anonymous => "Anonymous".to_string(),
+                    AnonymityLevel::Transparent => "Transparent".to_string(),
+                },
+            })
+            .collect()
+    }
+
+    pub fn api_status(&self) -> ApiStatus {
+        let stats = self.stats();
+        ApiStatus {
+            total_candidates: self.total_candidates.load(Ordering::Relaxed),
+            checked_count: self.checked_count.load(Ordering::Relaxed),
+            working_count: stats.healthy_proxies,
+            quarantined_count: stats.quarantined_proxies,
+            avg_latency_ms: stats.avg_latency_ms,
+            is_scraping: self.is_scraping.load(Ordering::Relaxed),
         }
     }
 }

@@ -145,7 +145,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let checker_config = CheckerConfig {
                 max_concurrency: concurrency,
                 timeout: Duration::from_secs(5),
-                target_authority: "cloudflare.com:443".to_string(),
+                connect_timeout: Duration::from_secs(5),
+                total_timeout: Duration::from_secs(10),
+                target_authority: "ipv4.icanhazip.com:443".to_string(),
             };
             let checker = Arc::new(ProxyChecker::with_config(
                 Arc::clone(&geo_resolver),
@@ -192,12 +194,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
 
-                    // 3. Run validation pipeline
+                    // 3. Run streaming validation pipeline (immediate pool insertion)
                     if !all_to_check.is_empty() {
-                        let verified = checker_clone.check_all(all_to_check).await;
-                        for v in verified {
-                            pool_clone.add_or_update(v);
-                        }
+                        let _verified = checker_clone
+                            .check_all_streaming(all_to_check, Arc::clone(&pool_clone))
+                            .await;
                     }
 
                     let stats = pool_clone.stats();
@@ -288,7 +289,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let checker_config = CheckerConfig {
                 max_concurrency: concurrency,
                 timeout: Duration::from_secs(5),
-                target_authority: "cloudflare.com:443".to_string(),
+                connect_timeout: Duration::from_secs(5),
+                total_timeout: Duration::from_secs(10),
+                target_authority: "ipv4.icanhazip.com:443".to_string(),
             };
             let checker = ProxyChecker::with_config(geo_resolver, checker_config, direct_ip);
 
