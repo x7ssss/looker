@@ -1,20 +1,24 @@
 use std::io::SeekFrom;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use indicatif::{ProgressBar, ProgressStyle};
-use reqwest::Client;
-use tokio::io::AsyncSeekExt;
-use tokio::sync::{Mutex, Semaphore};
-use tracing::{error, info, warn};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use reqwest::{Client, Proxy, StatusCode};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::{mpsc, Mutex};
+use tracing::{debug, error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use looker_mega::{
-    decrypt_ctr, ChunkInfo, ChunkIterator, MegaCbcMac, MegaClient, MegaLink,
+    compute_chunk_mac, decrypt_ctr, ChunkInfo, ChunkIterator, ChunkMac, FileMacAccumulator,
+    MegaClient, MegaError, MegaLink,
 };
+
+const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_CHUNK_RETRIES: usize = 8;
 
 #[derive(Parser, Debug)]
 #[command(name = "looker-down", version, about = "High-speed native multi-threaded MEGA downloader")]
@@ -22,21 +26,27 @@ struct Args {
     /// MEGA.nz public URL (e.g., https://mega.nz/file/xxxx#yyyy)
     url: String,
 
-    /// Output file path (defaults to remote file name)
+    /// Destination output path or directory (defaults to decrypted remote filename)
     #[arg(short, long)]
     output: Option<PathBuf>,
 
-    /// Concurrent chunk download workers
-    #[arg(short, long, default_value_t = 8)]
+    /// Maximum parallel chunk worker slots
+    #[arg(short, long, default_value_t = 6)]
     concurrency: usize,
 
-    /// HTTP CONNECT proxy gateway (e.g. http://127.0.0.1:8080)
+    /// Local rotating proxy gateway address
     #[arg(long, default_value = "http://127.0.0.1:8080")]
     gateway: String,
 
-    /// Disable rotating proxy gateway and connect directly
+    /// Bypass rotating proxy gateway and download directly via host IP
     #[arg(long)]
     direct: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ChunkTask {
+    info: ChunkInfo,
+    attempt: usize,
 }
 
 #[tokio::main]
@@ -50,177 +60,332 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let args = Args::parse();
-
     let link = MegaLink::parse(&args.url)?;
-    let gateway_opt = if args.direct {
+
+    let gateway_url = if args.direct {
         None
     } else {
         Some(args.gateway.as_str())
     };
 
-    info!("Connecting to MEGA API (Gateway: {:?})...", gateway_opt);
-    let mega = MegaClient::new(gateway_opt);
-    let meta = mega.get_file_metadata(&link).await?;
-
-    let out_path = args
-        .output
-        .unwrap_or_else(|| PathBuf::from(&meta.name));
-
     println!("============================================================");
+    println!("     Looker Wire-Speed Native MEGA Downloader Engine        ");
+    println!("============================================================");
+
+    // 1. Probe local gateway if proxy routing is enabled
+    let mut route_status = if let Some(gw) = gateway_url {
+        format!("Routing via {} (connecting...)", gw)
+    } else {
+        "Direct host connection (proxy disabled)".to_string()
+    };
+
+    if let Some(gw) = gateway_url {
+        let test_client = Client::builder()
+            .timeout(Duration::from_millis(1500))
+            .build()?;
+        let status_url = format!("{}/status", gw.trim_end_matches('/'));
+        if let Ok(resp) = test_client.get(&status_url).send().await {
+            if resp.status().is_success() {
+                if let Ok(val) = resp.json::<serde_json::Value>().await {
+                    let healthy = val.get("healthy_proxies").and_then(|v| v.as_u64()).unwrap_or(0);
+                    route_status = format!("Routing via {} [{} healthy proxies active]", gw, healthy);
+                }
+            }
+        }
+    }
+
+    info!("{}", route_status);
+    info!("Resolving file metadata via MEGA API...");
+
+    let mega = MegaClient::new(gateway_url);
+    let meta = mega.resolve_file(&link).await?;
+
+    // Determine target output path
+    let out_path = match args.output {
+        Some(p) => {
+            if p.is_dir() || p.to_string_lossy().ends_with('/') || p.to_string_lossy().ends_with('\\') {
+                p.join(&meta.name)
+            } else {
+                p
+            }
+        }
+        None => PathBuf::from(&meta.name),
+    };
+
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+    }
+
     println!("File Name   : {}", meta.name);
     println!("File Size   : {} bytes ({:.2} MB)", meta.size, meta.size as f64 / (1024.0 * 1024.0));
-    println!("Handle      : {}", meta.handle);
-    println!("Output Path : {}", out_path.display());
-    println!("Concurrency : {} workers", args.concurrency);
-    println!("Proxy Route : {}", if args.direct { "Direct connection" } else { &args.gateway });
+    println!("File Handle : {}", meta.handle);
+    println!("Destination : {}", out_path.display());
+    println!("Workers     : {} concurrent slots", args.concurrency);
+    println!("Proxy Route : {}", route_status);
     println!("============================================================");
 
-    // Pre-allocate destination file
-    let file = std::fs::File::create(&out_path)?;
-    file.set_len(meta.size)?;
-    drop(file);
+    // 2. Pre-allocate target sparse file on disk (Zero intermediate temp files)
+    info!("Pre-allocating {} bytes on disk...", meta.size);
+    let std_file = std::fs::File::create(&out_path)?;
+    std_file.set_len(meta.size)?;
+    drop(std_file);
 
-    let shared_file = Arc::new(tokio::sync::Mutex::new(
+    let shared_file = Arc::new(Mutex::new(
         tokio::fs::OpenOptions::new()
             .write(true)
             .open(&out_path)
             .await?,
     ));
 
+    // 3. Initialize chunk scheduling
     let chunks: Vec<ChunkInfo> = ChunkIterator::new(meta.size).collect();
     let total_chunks = chunks.len();
-    info!("File scheduled into {} dynamic chunks", total_chunks);
+    info!("Scheduled {} dynamic variable chunks", total_chunks);
 
-    let pb = ProgressBar::new(meta.size);
-    pb.set_style(
+    // 4. Setup indicatif MultiProgress UI
+    let mp = MultiProgress::new();
+
+    let pb_main = mp.add(ProgressBar::new(meta.size));
+    pb_main.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, ETA {eta})")
             .unwrap()
             .progress_chars("#>-"),
     );
 
+    let pb_status = mp.add(ProgressBar::new(total_chunks as u64));
+    pb_status.set_style(
+        ProgressStyle::default_bar()
+            .template("Status: {msg}")
+            .unwrap(),
+    );
+    pb_status.set_message(format!(
+        "Chunks 0/{} completed | Concurrency: {} | {}",
+        total_chunks, args.concurrency, route_status
+    ));
+
+    // Build HTTP client for workers
     let mut http_builder = Client::builder()
-        .timeout(Duration::from_secs(30));
-    if let Some(gw) = gateway_opt {
-        if let Ok(proxy) = reqwest::Proxy::all(gw) {
+        .timeout(CHUNK_TIMEOUT);
+    if let Some(gw) = gateway_url {
+        if let Ok(proxy) = Proxy::all(gw) {
             http_builder = http_builder.proxy(proxy);
         }
     }
-    let http = http_builder.build()?;
+    let http = Arc::new(http_builder.build()?);
 
-    let sem = Arc::new(Semaphore::new(args.concurrency));
-    let downloaded_bytes = Arc::new(AtomicU64::new(0));
-    let mac_tracker = Arc::new(Mutex::new(vec![[0u8; 16]; total_chunks]));
-
-    let mut tasks = Vec::with_capacity(total_chunks);
-
+    // 5. Worker task queue channels
+    let (tx, rx) = mpsc::channel::<ChunkTask>(total_chunks + 32);
     for chunk in chunks {
-        let permit = sem.clone().acquire_owned().await.unwrap();
-        let http = http.clone();
+        tx.send(ChunkTask { info: chunk, attempt: 0 }).await.unwrap();
+    }
+
+    let chunk_macs = Arc::new(Mutex::new(vec![None::<ChunkMac>; total_chunks]));
+    let completed_chunks = Arc::new(AtomicUsize::new(0));
+    let active_workers = Arc::new(AtomicUsize::new(0));
+
+    let mut worker_handles = Vec::with_capacity(args.concurrency);
+    let rx = Arc::new(Mutex::new(rx));
+
+    for _worker_id in 0..args.concurrency {
+        let rx = Arc::clone(&rx);
+        let tx = tx.clone();
+        let http = Arc::clone(&http);
         let storage_url = meta.download_url.clone();
         let aes_key = meta.key.aes_key;
         let nonce = meta.key.nonce;
         let file = Arc::clone(&shared_file);
-        let pb = pb.clone();
-        let d_bytes = Arc::clone(&downloaded_bytes);
-        let macs = Arc::clone(&mac_tracker);
+        let pb_main = pb_main.clone();
+        let pb_status = pb_status.clone();
+        let macs = Arc::clone(&chunk_macs);
+        let completed = Arc::clone(&completed_chunks);
+        let active = Arc::clone(&active_workers);
+        let route_display = route_status.clone();
 
-        tasks.push(tokio::spawn(async move {
-            let _permit = permit;
+        worker_handles.push(tokio::spawn(async move {
+            loop {
+                let task = {
+                    let mut lock = rx.lock().await;
+                    lock.recv().await
+                };
 
-            // INVARIANT 5: Storage Node Fetching Strategy
-            // Primary: path range /{START}-{END}. Fallback: HTTP Range header.
-            let range_path_url = format!("{}/{}", storage_url, chunk.path_range());
+                let task = match task {
+                    Some(t) => t,
+                    None => break, // Queue drained
+                };
 
-            let resp = match http.get(&range_path_url).send().await {
-                Ok(r) if r.status().is_success() => r,
-                _ => {
-                    // Fallback to HTTP Range header
-                    let range_header = format!("bytes={}-{}", chunk.offset, chunk.end_offset() - 1);
-                    http.get(&storage_url)
-                        .header("Range", range_header)
-                        .send()
-                        .await
-                        .map_err(|e| format!("Chunk {} fetch failed: {}", chunk.index, e))?
+                active.fetch_add(1, Ordering::Relaxed);
+                let chunk = task.info;
+
+                let download_fut = async {
+                    // INVARIANT 5: Storage Node Fetching
+                    // Primary: path range /{START}-{END}. Fallback: HTTP Range header.
+                    let range_path_url = format!("{}/{}", storage_url, chunk.path_range());
+
+                    let resp_res = http.get(&range_path_url).send().await;
+                    let resp = match resp_res {
+                        Ok(r) if r.status().is_success() => r,
+                        Ok(r) if r.status() == StatusCode::from_u16(509).unwrap_or(StatusCode::TOO_MANY_REQUESTS) => {
+                            // HTTP 509 Bandwidth Limit Exceeded
+                            return Err(MegaError::OverQuota);
+                        }
+                        _ => {
+                            // Fallback to HTTP Range header
+                            let range_val = format!("bytes={}-{}", chunk.offset, chunk.end_offset() - 1);
+                            let r2 = http.get(&storage_url)
+                                .header("Range", range_val)
+                                .send()
+                                .await
+                                .map_err(MegaError::Http)?;
+
+                            if r2.status() == StatusCode::from_u16(509).unwrap_or(StatusCode::TOO_MANY_REQUESTS) {
+                                return Err(MegaError::OverQuota);
+                            }
+                            if !r2.status().is_success() {
+                                return Err(MegaError::Http(r2.error_for_status().unwrap_err()));
+                            }
+                            r2
+                        }
+                    };
+
+                    let body_bytes = resp.bytes().await.map_err(MegaError::Http)?;
+                    if body_bytes.len() as u64 != chunk.size {
+                        return Err(MegaError::SizeMismatch {
+                            expected: chunk.size,
+                            actual: body_bytes.len() as u64,
+                        });
+                    }
+
+                    let mut plaintext = body_bytes.to_vec();
+
+                    // In-place AES-128-CTR decryption
+                    decrypt_ctr(&aes_key, &nonce, chunk.offset, &mut plaintext);
+
+                    // Compute chunk CBC-MAC
+                    let mac = compute_chunk_mac(&aes_key, &nonce, &plaintext);
+
+                    // Sparse file direct write to target file offset
+                    {
+                        let mut f = file.lock().await;
+                        f.seek(SeekFrom::Start(chunk.offset)).await?;
+                        f.write_all(&plaintext).await?;
+                    }
+
+                    Ok::<ChunkMac, MegaError>(mac)
+                };
+
+                let res = tokio::time::timeout(CHUNK_TIMEOUT, download_fut).await;
+
+                active.fetch_sub(1, Ordering::Relaxed);
+
+                match res {
+                    Ok(Ok(mac)) => {
+                        // Success! Record chunk mac
+                        {
+                            let mut lock = macs.lock().await;
+                            lock[chunk.index] = Some(mac);
+                        }
+
+                        let done = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                        pb_main.inc(chunk.size);
+                        pb_status.set_message(format!(
+                            "Chunks {}/{} completed | Workers: {} active | {}",
+                            done, total_chunks, active.load(Ordering::Relaxed), route_display
+                        ));
+
+                        if done == total_chunks {
+                            break;
+                        }
+                    }
+                    Ok(Err(MegaError::OverQuota)) => {
+                        // HTTP 509 / EOVERQUOTA: Rotate proxy by sleeping briefly and requeueing
+                        debug!("Chunk {} encountered quota limit (509). Backing off and retrying...", chunk.index);
+                        tokio::time::sleep(Duration::from_millis(500 * (task.attempt + 1) as u64)).await;
+
+                        if task.attempt < MAX_CHUNK_RETRIES {
+                            let _ = tx.send(ChunkTask { info: chunk, attempt: task.attempt + 1 }).await;
+                        } else {
+                            error!("Chunk {} failed after {} quota retries", chunk.index, MAX_CHUNK_RETRIES);
+                            return Err(MegaError::OverQuota);
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        debug!("Chunk {} error (attempt {}): {}", chunk.index, task.attempt + 1, e);
+                        if task.attempt < MAX_CHUNK_RETRIES {
+                            tokio::time::sleep(Duration::from_millis(250 * (task.attempt + 1) as u64)).await;
+                            let _ = tx.send(ChunkTask { info: chunk, attempt: task.attempt + 1 }).await;
+                        } else {
+                            error!("Chunk {} permanently failed after {} retries: {}", chunk.index, MAX_CHUNK_RETRIES, e);
+                            return Err(e);
+                        }
+                    }
+                    Err(_) => {
+                        // Timeout
+                        debug!("Chunk {} timed out (> {:?}) on attempt {}", chunk.index, CHUNK_TIMEOUT, task.attempt + 1);
+                        if task.attempt < MAX_CHUNK_RETRIES {
+                            let _ = tx.send(ChunkTask { info: chunk, attempt: task.attempt + 1 }).await;
+                        } else {
+                            error!("Chunk {} permanently timed out after {} retries", chunk.index, MAX_CHUNK_RETRIES);
+                            return Err(MegaError::ChunkDownloadFailed(MAX_CHUNK_RETRIES));
+                        }
+                    }
                 }
-            };
-
-            let mut chunk_bytes = resp
-                .bytes()
-                .await
-                .map_err(|e| format!("Chunk {} body read error: {}", chunk.index, e))?
-                .to_vec();
-
-            if chunk_bytes.len() as u64 != chunk.size {
-                return Err(format!(
-                    "Chunk {} size mismatch: expected {}, got {}",
-                    chunk.index,
-                    chunk.size,
-                    chunk_bytes.len()
-                ));
             }
 
-            // In-place AES-128-CTR decryption
-            decrypt_ctr(&aes_key, &nonce, chunk.offset, &mut chunk_bytes);
-
-            // Compute Chunk CBC-MAC
-            let mac_engine = MegaCbcMac::new(&aes_key, &nonce);
-            let chunk_mac = mac_engine.compute_chunk_mac(&chunk_bytes);
-
-            // Write decrypted block into file at chunk offset
-            {
-                let mut f = file.lock().await;
-                use tokio::io::AsyncWriteExt;
-                f.seek(SeekFrom::Start(chunk.offset)).await.map_err(|e| e.to_string())?;
-                f.write_all(&chunk_bytes).await.map_err(|e| e.to_string())?;
-            }
-
-            // Store chunk mac in order
-            {
-                let mut m = macs.lock().await;
-                m[chunk.index] = chunk_mac;
-            }
-
-            d_bytes.fetch_add(chunk.size, Ordering::Relaxed);
-            pb.inc(chunk.size);
-
-            Ok::<(), String>(())
+            Ok::<(), MegaError>(())
         }));
     }
 
-    for task in tasks {
-        match task.await {
+    // Await all workers
+    for h in worker_handles {
+        match h.await {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
-                pb.finish_and_clear();
-                error!("Download error: {}", e);
+                pb_main.finish_and_clear();
+                pb_status.finish_and_clear();
+                error!("Download pipeline aborted: {}", e);
                 return Err(e.into());
             }
             Err(e) => {
-                pb.finish_and_clear();
-                error!("Task panicked: {}", e);
+                pb_main.finish_and_clear();
+                pb_status.finish_and_clear();
+                error!("Worker thread panicked: {}", e);
                 return Err(e.into());
             }
         }
     }
 
-    pb.finish_with_message("Download completed. Verifying integrity...");
+    pb_main.finish_with_message("Transfer completed");
+    pb_status.finish_with_message("Validating CBC-MAC integrity in-flight...");
 
-    // CBC-MAC Integrity Condensation & Verification
-    let mut mac_verifier = MegaCbcMac::new(&meta.key.aes_key, &meta.key.nonce);
-    let recorded_macs = mac_tracker.lock().await;
-    for &chunk_mac in recorded_macs.iter() {
-        mac_verifier.add_chunk_mac(chunk_mac);
+    println!("\nValidating cryptographic CBC-MAC checksum...");
+    let mut accumulator = FileMacAccumulator::new(&meta.key.aes_key);
+    let macs = chunk_macs.lock().await;
+
+    for (idx, mac_opt) in macs.iter().enumerate() {
+        let chunk_mac = mac_opt.ok_or_else(|| {
+            format!("Missing chunk MAC for chunk index {}", idx)
+        })?;
+        accumulator.accumulate(&chunk_mac);
     }
 
-    match mac_verifier.verify_integrity(meta.key.expected_mac) {
+    match accumulator.verify(meta.key.expected_mac) {
         Ok(()) => {
-            println!("MAC Integrity Check : PASSED [AES-ECB Condensation Verified]");
-            println!("File successfully downloaded to: {}", out_path.display());
+            println!("============================================================");
+            println!(" Cryptographic CBC-MAC Checksum : VERIFIED [PASS]");
+            println!(" Expected MAC words             : [{:#010x}, {:#010x}]", meta.key.expected_mac[0], meta.key.expected_mac[1]);
+            println!(" Computed condensation MAC      : [{:#010x}, {:#010x}]", accumulator.finish()[0], accumulator.finish()[1]);
+            println!(" File successfully saved to     : {}", out_path.display());
+            println!("============================================================");
         }
         Err(e) => {
-            println!("MAC Integrity Check : FAILED ({})", e);
-            warn!("Downloaded file may be corrupted");
+            println!("============================================================");
+            println!(" Cryptographic CBC-MAC Checksum : FAILED [CORRUPTION DETECTED]");
+            println!(" Error Details                  : {}", e);
+            println!("============================================================");
+            return Err(e.into());
         }
     }
 

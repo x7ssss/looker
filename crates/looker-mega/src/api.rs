@@ -19,6 +19,8 @@ pub struct FileMetadata {
     pub key: MegaKey,
 }
 
+pub type MegaFileInfo = FileMetadata;
+
 #[derive(Serialize)]
 struct DownloadReq<'a> {
     a: &'a str,
@@ -31,6 +33,7 @@ struct DownloadReq<'a> {
 #[serde(untagged)]
 enum ApiResponse {
     Success(Vec<DownloadResp>),
+    ErrorArray(Vec<i32>),
     Error(i32),
 }
 
@@ -71,6 +74,11 @@ impl MegaClient {
         }
     }
 
+    /// Resolves file metadata and storage node URL from a public MEGA link.
+    pub async fn resolve_file(&self, link: &MegaLink) -> Result<MegaFileInfo, MegaError> {
+        self.get_file_metadata(link).await
+    }
+
     /// Queries the MEGA API to retrieve storage node URL and file metadata.
     pub async fn get_file_metadata(&self, link: &MegaLink) -> Result<FileMetadata, MegaError> {
         let key = MegaKey::from_base64_key(&link.key)?;
@@ -89,7 +97,7 @@ impl MegaClient {
 
         match api_resp {
             ApiResponse::Success(mut list) => {
-                let first = list.pop().ok_or(MegaError::ApiError(-9))?;
+                let first = list.pop().ok_or(MegaError::NotFound)?;
                 let attrs: MegaFileAttributes = decrypt_attributes(&key.aes_key, &first.at)?;
 
                 Ok(FileMetadata {
@@ -100,7 +108,21 @@ impl MegaClient {
                     key,
                 })
             }
-            ApiResponse::Error(err_code) => Err(MegaError::ApiError(err_code)),
+            ApiResponse::ErrorArray(errs) => {
+                let err_code = errs.first().copied().unwrap_or(-1);
+                match err_code {
+                    -17 => Err(MegaError::OverQuota),
+                    -9 => Err(MegaError::NotFound),
+                    -16 => Err(MegaError::Blocked),
+                    code => Err(MegaError::ApiError(code)),
+                }
+            }
+            ApiResponse::Error(err_code) => match err_code {
+                -17 => Err(MegaError::OverQuota),
+                -9 => Err(MegaError::NotFound),
+                -16 => Err(MegaError::Blocked),
+                code => Err(MegaError::ApiError(code)),
+            },
         }
     }
 }

@@ -158,11 +158,18 @@
 - [x] `looker-proxy`: Background daemon orchestrating 15-minute re-harvest, validation, quarantine re-checks, and gateway.
 - [x] `looker-proxy`: One-shot `scrape` command dumping verified proxies to `out/proxies.txt` and `out/proxies.json`.
 
-### Phase 3: MEGA Engine & Downloader CLI
-- [ ] `looker-mega`: Storage node API communication (`g` command).
-- [ ] `looker-down`: Multi-threaded parallel chunk worker pool.
-- [ ] `looker-down`: Dynamic progress bar with transfer rate, ETA, and proxy rotation metrics (`indicatif`).
-- [ ] `looker-down`: Automatic failover: if a chunk fetch fails/stalls on one proxy, requeue chunk to next proxy.
+### Phase 3: The Native MEGA Downloader Engine (looker-mega & looker-down)
+- [x] `looker-mega`: `MegaClient::resolve_file` resolving handles via `https://g.api.mega.co.nz/cs` with quota detection (`EOVERQUOTA -17`, `ENOENT -9`, `EBLOCKED -16`).
+- [x] `looker-mega`: Zero-IV AES-128-CBC attribute block decryption verifying `MEGA` magic prefix and extracting file metadata.
+- [x] `looker-mega`: 32-byte key derivation ($k_0 \dots k_7$), `Nonce64 || BE64(pos / 16)` CTR keystream math with lower 64-bit incrementation.
+- [x] `looker-mega`: `ChunkIterator` generating exact chunk schedule (128 KiB to 896 KiB linear scaling for chunks 0..7, 1 MiB fixed for chunk 8+).
+- [x] `looker-mega`: `compute_chunk_mac` and `FileMacAccumulator` with 64-bit condensation folding `[(c0^c1), (c2^c3)]` verifying against `[k6, k7]`.
+- [x] `looker-mega`: Integration unit test suite (`crypto_tests.rs`) covering key derivation vectors, arbitrary CTR offset decryption, CBC attribute decryption, and MAC folding.
+- [x] `looker-down`: Sparse file allocation (`set_len`) on disk with zero temporary chunk files.
+- [x] `looker-down`: Parallel chunk worker pool with MPSC queue, per-chunk 30s timeout, HTTP 509 / -17 quota detection, and automatic backoff/re-queueing through rotating gateway.
+- [x] `looker-down`: Direct-to-offset sparse disk writing (`seek` + `write_all`) with in-flight AES-128-CTR decryption and CBC-MAC computation.
+- [x] `looker-down`: Multi-progress `indicatif` UI rendering instantaneous transfer speed, ETA, chunk completion counters, and active proxy gateway indicators.
+- [x] `looker-down`: Standalone CLI supporting `--output`, `--concurrency`, `--gateway`, and `--direct`.
 
 ### Phase 4: CI/CD Cross-Compilation Matrix & Production Tuning
 - [ ] GitHub Actions workflow for cross-compiling Linux (x86_64-musl, aarch64-musl), macOS (universal2), Windows (x86_64-pc-windows-msvc).

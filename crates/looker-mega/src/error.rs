@@ -17,8 +17,17 @@ pub enum MegaError {
     #[error("Attribute JSON deserialization failed: {0}")]
     AttributeJson(#[from] serde_json::Error),
 
-    #[error("HTTP request to MEGA API failed: {0}")]
+    #[error("HTTP request to MEGA failed: {0}")]
     Http(#[from] reqwest::Error),
+
+    #[error("MEGA bandwidth transfer quota exceeded (EOVERQUOTA -17 / HTTP 509)")]
+    OverQuota,
+
+    #[error("MEGA resource not found (ENOENT -9)")]
+    NotFound,
+
+    #[error("MEGA resource blocked or access denied (EBLOCKED -16)")]
+    Blocked,
 
     #[error("MEGA API error code: {0}")]
     ApiError(i32),
@@ -33,4 +42,10 @@ pub enum MegaError {
 
     #[error("File size mismatch: expected {expected}, actual {actual}")]
     SizeMismatch { expected: u64, actual: u64 },
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Chunk download failed after {0} attempts")]
+    ChunkDownloadFailed(usize),
 }
