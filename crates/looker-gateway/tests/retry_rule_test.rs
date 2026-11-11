@@ -178,6 +178,24 @@ async fn test_gateway_live_and_status_endpoints() {
         anonymity: AnonymityLevel::Elite,
         geo: None,
     });
+    let http_addr: SocketAddr = "192.0.2.2:8080".parse().unwrap();
+    pool.add_or_update(CheckedProxy {
+        addr: http_addr,
+        proto: ProxyProto::HttpConnect,
+        latency: Duration::from_millis(35),
+        exit_ip: Some(http_addr.ip()),
+        anonymity: AnonymityLevel::Elite,
+        geo: None,
+    });
+    let s4_addr: SocketAddr = "192.0.2.3:1080".parse().unwrap();
+    pool.add_or_update(CheckedProxy {
+        addr: s4_addr,
+        proto: ProxyProto::Socks4,
+        latency: Duration::from_millis(45),
+        exit_ip: Some(s4_addr.ip()),
+        anonymity: AnonymityLevel::Elite,
+        geo: None,
+    });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let gateway_addr = listener.local_addr().unwrap();
@@ -187,7 +205,7 @@ async fn test_gateway_live_and_status_endpoints() {
         gateway.run_on_listener(listener).await.unwrap();
     });
 
-    // 1. Test GET /live.txt
+    // 1. Test GET /live.txt and /all.txt
     let mut client = TcpStream::connect(gateway_addr).await.unwrap();
     client
         .write_all(b"GET /live.txt HTTP/1.1\r\nHost: localhost\r\n\r\n")
@@ -202,6 +220,57 @@ async fn test_gateway_live_and_status_endpoints() {
     assert!(resp_str.contains("Content-Type: text/plain"));
     assert!(resp_str.contains("socks5://192.0.2.1:1080"));
 
+    let mut client_all = TcpStream::connect(gateway_addr).await.unwrap();
+    client_all
+        .write_all(b"GET /all.txt HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp_buf_all = vec![0u8; 1024];
+    let n_all = client_all.read(&mut resp_buf_all).await.unwrap();
+    let resp_str_all = String::from_utf8_lossy(&resp_buf_all[..n_all]);
+    assert!(resp_str_all.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str_all.contains("socks5://192.0.2.1:1080"));
+    assert!(resp_str_all.contains("http://192.0.2.2:8080"));
+    assert!(resp_str_all.contains("socks4://192.0.2.3:1080"));
+
+    // Test protocol-segregated feeds: /http.txt, /socks4.txt, /socks5.txt
+    let mut client_http = TcpStream::connect(gateway_addr).await.unwrap();
+    client_http
+        .write_all(b"GET /http.txt HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp_buf_http = vec![0u8; 1024];
+    let n_http = client_http.read(&mut resp_buf_http).await.unwrap();
+    let resp_str_http = String::from_utf8_lossy(&resp_buf_http[..n_http]);
+    assert!(resp_str_http.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str_http.contains("192.0.2.2:8080"));
+    assert!(!resp_str_http.contains("http://"));
+    assert!(!resp_str_http.contains("192.0.2.1:1080"));
+
+    let mut client_s4 = TcpStream::connect(gateway_addr).await.unwrap();
+    client_s4
+        .write_all(b"GET /socks4.txt HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp_buf_s4 = vec![0u8; 1024];
+    let n_s4 = client_s4.read(&mut resp_buf_s4).await.unwrap();
+    let resp_str_s4 = String::from_utf8_lossy(&resp_buf_s4[..n_s4]);
+    assert!(resp_str_s4.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str_s4.contains("192.0.2.3:1080"));
+    assert!(!resp_str_s4.contains("socks4://"));
+
+    let mut client_s5 = TcpStream::connect(gateway_addr).await.unwrap();
+    client_s5
+        .write_all(b"GET /socks5.txt HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp_buf_s5 = vec![0u8; 1024];
+    let n_s5 = client_s5.read(&mut resp_buf_s5).await.unwrap();
+    let resp_str_s5 = String::from_utf8_lossy(&resp_buf_s5[..n_s5]);
+    assert!(resp_str_s5.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str_s5.contains("192.0.2.1:1080"));
+    assert!(!resp_str_s5.contains("socks5://"));
+
     // 2. Test GET /status
     let mut client2 = TcpStream::connect(gateway_addr).await.unwrap();
     client2
@@ -215,8 +284,11 @@ async fn test_gateway_live_and_status_endpoints() {
 
     assert!(resp_str2.starts_with("HTTP/1.1 200 OK"));
     assert!(resp_str2.contains("Content-Type: application/json"));
-    assert!(resp_str2.contains("\"total_proxies\": 1"));
-    assert!(resp_str2.contains("\"healthy_proxies\": 1"));
+    assert!(resp_str2.contains("\"total_proxies\": 3"));
+    assert!(resp_str2.contains("\"healthy_proxies\": 3"));
+    assert!(resp_str2.contains("\"healthy_http\": 1"));
+    assert!(resp_str2.contains("\"healthy_socks4\": 1"));
+    assert!(resp_str2.contains("\"healthy_socks5\": 1"));
 
     // 3. Test GET /ui (Embedded Dashboard)
     let mut client3 = TcpStream::connect(gateway_addr).await.unwrap();
@@ -261,7 +333,11 @@ async fn test_gateway_live_and_status_endpoints() {
 
     assert!(resp_str5.starts_with("HTTP/1.1 200 OK"));
     assert!(resp_str5.contains("Content-Type: application/json"));
-    assert!(resp_str5.contains("\"working_count\":1"));
+    assert!(resp_str5.contains("\"working_count\":3"));
+    assert!(resp_str5.contains("\"healthy_by_proto\""));
+    assert!(resp_str5.contains("\"http\":1"));
+    assert!(resp_str5.contains("\"socks4\":1"));
+    assert!(resp_str5.contains("\"socks5\":1"));
 
     // 6. Test GET /api/fastest
     let mut client6 = TcpStream::connect(gateway_addr).await.unwrap();

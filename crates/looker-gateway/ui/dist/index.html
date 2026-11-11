@@ -48,12 +48,15 @@
           <p class="text-xs text-zinc-500">Autonomous Proxy Scraper & Gateway Daemon</p>
         </div>
       </div>
-      <div class="flex items-center gap-3">
-        <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium">
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium mr-1">
           <span class="h-2 w-2 rounded-full bg-emerald-400 pulse-dot"></span>
           <span id="gateway-status">GATEWAY ONLINE (127.0.0.1:8080)</span>
         </div>
-        <a href="/live.txt" target="_blank" class="px-3 py-1.5 rounded-lg border border-stroke bg-surface hover:bg-panel text-xs text-zinc-300 transition-colors mono">live.txt</a>
+        <a href="/all.txt" target="_blank" title="All healthy proxies (proto://host:port)" class="px-2.5 py-1.5 rounded-lg border border-stroke bg-surface hover:bg-panel text-xs text-zinc-300 hover:text-white transition-colors mono">all.txt</a>
+        <a href="/socks5.txt" target="_blank" title="Healthy SOCKS5 proxies (host:port)" class="px-2.5 py-1.5 rounded-lg border border-violet-500/20 bg-violet-500/5 hover:bg-violet-500/15 text-xs text-violet-300 hover:text-violet-200 transition-colors mono">socks5.txt</a>
+        <a href="/socks4.txt" target="_blank" title="Healthy SOCKS4 proxies (host:port)" class="px-2.5 py-1.5 rounded-lg border border-sky-500/20 bg-sky-500/5 hover:bg-sky-500/15 text-xs text-sky-300 hover:text-sky-200 transition-colors mono">socks4.txt</a>
+        <a href="/http.txt" target="_blank" title="Healthy HTTP proxies (host:port)" class="px-2.5 py-1.5 rounded-lg border border-blue-500/20 bg-blue-500/5 hover:bg-blue-500/15 text-xs text-blue-300 hover:text-blue-200 transition-colors mono">http.txt</a>
       </div>
     </header>
 
@@ -62,7 +65,13 @@
       <div class="p-4 rounded-xl border border-stroke bg-surface">
         <span class="text-[11px] font-medium text-zinc-400">Healthy Proxies</span>
         <div class="text-3xl font-bold mono text-emerald-400 mt-2" id="metric-healthy">0</div>
-        <p class="text-[10px] text-zinc-500 mt-1">Ready for in-flight routing</p>
+        <div class="flex items-center gap-2 mt-2 pt-2 border-t border-stroke/60 text-[10px] mono">
+          <span class="text-violet-400">S5: <span id="proto-s5-stat">0</span></span>
+          <span class="text-zinc-600">•</span>
+          <span class="text-sky-400">S4: <span id="proto-s4-stat">0</span></span>
+          <span class="text-zinc-600">•</span>
+          <span class="text-blue-400">HTTP: <span id="proto-http-stat">0</span></span>
+        </div>
       </div>
       <div class="p-4 rounded-xl border border-stroke bg-surface">
         <div class="flex items-center justify-between">
@@ -115,8 +124,25 @@
       <!-- Main Proxy Table -->
       <section class="lg:col-span-2 p-5 rounded-xl border border-stroke bg-surface space-y-4">
         <div class="flex flex-wrap items-center justify-between gap-3">
-          <h2 class="text-xs font-semibold text-zinc-200 uppercase tracking-wider">Surviving Proxy Pool</h2>
-          <input type="text" id="search-box" placeholder="Filter by IP, Country, Protocol..." class="px-3 py-1.5 rounded-lg bg-obsidian border border-stroke text-xs text-zinc-300 placeholder-zinc-600 outline-none focus:border-emerald-500/50 w-64 transition-colors" />
+          <div class="space-y-1.5">
+            <h2 class="text-xs font-semibold text-zinc-200 uppercase tracking-wider">Surviving Proxy Pool</h2>
+            <!-- Protocol Pill Selector -->
+            <div class="flex items-center gap-1.5" id="proto-pills">
+              <button onclick="setProtoFilter('all')" id="pill-all" class="proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-white/15 text-white border border-white/25 shadow-sm">
+                All (<span id="count-all">0</span>)
+              </button>
+              <button onclick="setProtoFilter('SOCKS5')" id="pill-socks5" class="proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">
+                SOCKS5 (<span id="count-socks5">0</span>)
+              </button>
+              <button onclick="setProtoFilter('SOCKS4')" id="pill-socks4" class="proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">
+                SOCKS4 (<span id="count-socks4">0</span>)
+              </button>
+              <button onclick="setProtoFilter('HTTP')" id="pill-http" class="proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">
+                HTTP (<span id="count-http">0</span>)
+              </button>
+            </div>
+          </div>
+          <input type="text" id="search-box" placeholder="Filter by IP, Country..." class="px-3 py-1.5 rounded-lg bg-obsidian border border-stroke text-xs text-zinc-300 placeholder-zinc-600 outline-none focus:border-emerald-500/50 w-56 transition-colors self-end" />
         </div>
         <div class="overflow-x-auto max-h-[460px] overflow-y-auto">
           <table class="w-full text-left text-xs">
@@ -139,11 +165,33 @@
   </div>
 
   <footer class="max-w-7xl mx-auto w-full px-4 py-4 text-center border-t border-stroke text-[11px] text-zinc-600 mono">
-    LOOKER // HIGH-PERFORMANCE PROXY DAEMON & MEGA ENGINE • 127.0.0.1:8080
+    LOOKER // HIGH-PERFORMANCE PROXY DAEMON & MEGA ENGINE - 127.0.0.1:8080
   </footer>
 
   <script>
     let allProxies = [];
+    let currentProto = 'all';
+
+    function setProtoFilter(proto) {
+      currentProto = proto;
+      const pills = {
+        'all': document.getElementById('pill-all'),
+        'SOCKS5': document.getElementById('pill-socks5'),
+        'SOCKS4': document.getElementById('pill-socks4'),
+        'HTTP': document.getElementById('pill-http'),
+      };
+
+      for (const [key, btn] of Object.entries(pills)) {
+        if (!btn) continue;
+        if (key === proto) {
+          btn.className = 'proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-white/15 text-white border border-white/25 shadow-sm';
+        } else {
+          btn.className = 'proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke';
+        }
+      }
+      renderTable();
+    }
+
     async function fetchStatus() {
       try {
         const res = await fetch('/api/status');
@@ -157,6 +205,16 @@
         const pct = d.total_candidates > 0 ? Math.min(100, Math.round((d.checked_count / d.total_candidates) * 100)) : 0;
         document.getElementById('progress-percent').textContent = pct + '%';
         document.getElementById('progress-bar').style.width = pct + '%';
+
+        if (d.healthy_by_proto) {
+          document.getElementById('proto-s5-stat').textContent = d.healthy_by_proto.socks5 || 0;
+          document.getElementById('proto-s4-stat').textContent = d.healthy_by_proto.socks4 || 0;
+          document.getElementById('proto-http-stat').textContent = d.healthy_by_proto.http || 0;
+          document.getElementById('count-socks5').textContent = d.healthy_by_proto.socks5 || 0;
+          document.getElementById('count-socks4').textContent = d.healthy_by_proto.socks4 || 0;
+          document.getElementById('count-http').textContent = d.healthy_by_proto.http || 0;
+          document.getElementById('count-all').textContent = d.working_count || 0;
+        }
       } catch (e) {}
     }
 
@@ -167,15 +225,25 @@
         const list = await res.json();
         const container = document.getElementById('fastest-list');
         if (!list || list.length === 0) return;
-        container.innerHTML = list.map(p => `
-          <div class="flex items-center justify-between p-2 rounded-lg bg-obsidian border border-stroke text-xs">
-            <div class="flex items-center gap-2">
-              <span class="mono text-zinc-200">${p.endpoint}</span>
-              <span class="px-1.5 py-0.5 rounded text-[10px] mono ${p.proto === 'SOCKS5' ? 'bg-violet-500/10 text-violet-400' : 'bg-blue-500/10 text-blue-400'}">${p.proto}</span>
+        container.innerHTML = list.map(p => {
+          const countryTag = (p.country_code || p.country) 
+            ? `<span class="text-[10px] mono text-zinc-400 bg-white/5 px-1 rounded">${p.country_code || p.country}</span>` 
+            : '';
+          const protoBadge = p.proto === 'SOCKS5'
+            ? 'bg-violet-500/10 text-violet-400 border border-violet-500/20'
+            : (p.proto === 'SOCKS4' ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20' : 'bg-blue-500/10 text-blue-400 border border-blue-500/20');
+
+          return `
+            <div class="flex items-center justify-between p-2 rounded-lg bg-obsidian border border-stroke text-xs">
+              <div class="flex items-center gap-2">
+                <span class="mono text-zinc-200">${p.endpoint}</span>
+                <span class="px-1.5 py-0.5 rounded text-[10px] mono ${protoBadge}">${p.proto}</span>
+                ${countryTag}
+              </div>
+              <span class="mono text-emerald-400 font-medium">${p.latency_ms}ms</span>
             </div>
-            <span class="mono text-emerald-400 font-medium">${p.latency_ms}ms</span>
-          </div>
-        `).join('');
+          `;
+        }).join('');
       } catch (e) {}
     }
 
@@ -189,28 +257,50 @@
     }
 
     function renderTable() {
-      const q = document.getElementById('search-box').value.toLowerCase();
-      const filtered = allProxies.filter(p => p.endpoint.toLowerCase().includes(q) || (p.country && p.country.toLowerCase().includes(q)) || p.proto.toLowerCase().includes(q));
+      const q = document.getElementById('search-box').value.trim().toLowerCase();
+      const filtered = allProxies.filter(p => {
+        if (currentProto !== 'all' && (p.proto || '').toUpperCase() !== currentProto) {
+          return false;
+        }
+        const endpoint = (p.endpoint || '').toLowerCase();
+        const country = (p.country_code || p.country || '').toLowerCase();
+        const proto = (p.proto || '').toLowerCase();
+        const anonymity = (p.anonymity || '').toLowerCase();
+        return endpoint.includes(q) || country.includes(q) || proto.includes(q) || anonymity.includes(q);
+      });
+
       const tbody = document.getElementById('proxy-table-body');
       if (filtered.length === 0) {
         tbody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-zinc-500">No matching proxies</td></tr>';
         return;
       }
-      tbody.innerHTML = filtered.slice(0, 50).map(p => `
-        <tr class="hover:bg-white/[0.02]">
-          <td class="py-2.5 mono text-zinc-200">${p.endpoint}</td>
-          <td class="py-2.5"><span class="px-1.5 py-0.5 rounded text-[10px] mono bg-white/5 border border-white/10 text-zinc-300">${p.proto}</span></td>
-          <td class="py-2.5 text-zinc-400">${p.country || '—'}</td>
-          <td class="py-2.5 mono ${p.latency_ms < 1000 ? 'text-emerald-400' : 'text-amber-400'}">${p.latency_ms}ms</td>
-          <td class="py-2.5 text-zinc-400 text-[11px]">${p.anonymity || 'Elite'}</td>
-        </tr>
-      `).join('');
+
+      tbody.innerHTML = filtered.slice(0, 50).map(p => {
+        const countryDisplay = p.country_code || p.country || 'N/A';
+        const latencyClass = p.latency_ms < 1000 
+          ? 'text-emerald-400' 
+          : (p.latency_ms < 2500 ? 'text-amber-400' : 'text-rose-400');
+        const protoClass = p.proto === 'SOCKS5'
+          ? 'bg-violet-500/10 text-violet-400 border border-violet-500/20'
+          : (p.proto === 'SOCKS4' ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20' : 'bg-blue-500/10 text-blue-400 border border-blue-500/20');
+
+        return `
+          <tr class="hover:bg-white/[0.02] transition-colors">
+            <td class="py-2.5 mono text-zinc-200">${p.endpoint}</td>
+            <td class="py-2.5"><span class="px-1.5 py-0.5 rounded text-[10px] mono ${protoClass}">${p.proto}</span></td>
+            <td class="py-2.5 text-zinc-300 mono font-medium">${countryDisplay}</td>
+            <td class="py-2.5 mono ${latencyClass}">${p.latency_ms}ms</td>
+            <td class="py-2.5 text-zinc-400 text-[11px]">${p.anonymity || 'Elite'}</td>
+          </tr>
+        `;
+      }).join('');
     }
 
     document.getElementById('search-box').addEventListener('input', renderTable);
     setInterval(fetchStatus, 1500);
     setInterval(fetchFastest, 2000);
     setInterval(fetchProxies, 3000);
+
     fetchStatus();
     fetchFastest();
     fetchProxies();

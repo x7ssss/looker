@@ -201,4 +201,15 @@ impl ProxyItem {
             geo: self.geo.clone(),
         }
     }
+
+    pub fn to_checked(&self) -> CheckedProxy {
+        CheckedProxy {
+            addr: self.addr,
+            proto: self.proto,
+            latency: Duration::from_millis(self.latency_ms.load(Ordering::Relaxed)),
+            exit_ip: self.exit_ip,
+            anonymity: self.anonymity,
+            geo: self.geo.clone(),
+        }
+    }
 }

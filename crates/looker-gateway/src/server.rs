@@ -188,9 +188,45 @@ async fn handle_client(
         None => (path_or_target, None),
     };
 
-    // Route 1: Local Live Proxy Feed (GET /live.txt)
-    if method.eq_ignore_ascii_case("GET") && req_path == "/live.txt" {
+    // Route 1: Local Live Proxy Feeds (GET /all.txt, GET /live.txt, GET /http.txt, GET /socks4.txt, GET /socks5.txt)
+    if method.eq_ignore_ascii_case("GET") && (req_path == "/all.txt" || req_path == "/live.txt") {
         let text_feed = pool.export_live_text();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            text_feed.len(),
+            text_feed
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    if method.eq_ignore_ascii_case("GET") && req_path == "/http.txt" {
+        let text_feed = pool.export_by_proto(ProxyProto::HttpConnect);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            text_feed.len(),
+            text_feed
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    if method.eq_ignore_ascii_case("GET") && req_path == "/socks4.txt" {
+        let text_feed = pool.export_by_proto(ProxyProto::Socks4);
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            text_feed.len(),
+            text_feed
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    if method.eq_ignore_ascii_case("GET") && req_path == "/socks5.txt" {
+        let text_feed = pool.export_by_proto(ProxyProto::Socks5);
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             text_feed.len(),

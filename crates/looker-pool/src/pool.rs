@@ -26,6 +26,16 @@ pub struct PoolStats {
     pub quarantined_proxies: usize,
     pub avg_latency_ms: u64,
     pub total_requests: u64,
+    pub healthy_http: usize,
+    pub healthy_socks4: usize,
+    pub healthy_socks5: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HealthyByProto {
+    pub http: usize,
+    pub socks4: usize,
+    pub socks5: usize,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -36,6 +46,7 @@ pub struct ApiStatus {
     pub quarantined_count: usize,
     pub avg_latency_ms: u64,
     pub is_scraping: bool,
+    pub healthy_by_proto: HealthyByProto,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -219,6 +230,29 @@ impl ProxyPool {
         text
     }
 
+    /// Generates raw `host:port\n` text feed for a specific protocol only (healthy proxies only).
+    pub fn export_by_proto(&self, proto: ProxyProto) -> String {
+        let items = self.items.read();
+        let mut text = String::new();
+        for item in items.iter() {
+            if item.is_healthy() && item.proto == proto {
+                text.push_str(&item.addr.to_string());
+                text.push('\n');
+            }
+        }
+        text
+    }
+
+    /// Returns a list of `CheckedProxy` structs for all currently healthy proxies.
+    pub fn healthy_checked(&self) -> Vec<CheckedProxy> {
+        let items = self.items.read();
+        items
+            .iter()
+            .filter(|i| i.is_healthy())
+            .map(|i| i.to_checked())
+            .collect()
+    }
+
     pub fn total_count(&self) -> usize {
         self.items.read().len()
     }
@@ -260,11 +294,19 @@ impl ProxyPool {
         let mut total_latency_ms: u64 = 0;
         let mut latency_count: u64 = 0;
         let mut total_requests: u64 = 0;
+        let mut healthy_http = 0;
+        let mut healthy_socks4 = 0;
+        let mut healthy_socks5 = 0;
 
         for item in items.iter() {
             total_requests += item.total_requests.load(Ordering::Relaxed);
             if item.is_healthy() {
                 healthy += 1;
+                match item.proto {
+                    ProxyProto::HttpConnect => healthy_http += 1,
+                    ProxyProto::Socks4 => healthy_socks4 += 1,
+                    ProxyProto::Socks5 => healthy_socks5 += 1,
+                }
                 let lat = item.latency_ms.load(Ordering::Relaxed);
                 if lat > 0 {
                     total_latency_ms += lat;
@@ -287,6 +329,9 @@ impl ProxyPool {
             quarantined_proxies: quarantined,
             avg_latency_ms,
             total_requests,
+            healthy_http,
+            healthy_socks4,
+            healthy_socks5,
         }
     }
 
@@ -378,6 +423,11 @@ impl ProxyPool {
             quarantined_count: stats.quarantined_proxies,
             avg_latency_ms: stats.avg_latency_ms,
             is_scraping: self.is_scraping.load(Ordering::Relaxed),
+            healthy_by_proto: HealthyByProto {
+                http: stats.healthy_http,
+                socks4: stats.healthy_socks4,
+                socks5: stats.healthy_socks5,
+            },
         }
     }
 }
@@ -446,5 +496,42 @@ mod tests {
         assert!(item.is_healthy());
         assert_eq!(pool.healthy_count(), 1);
         assert_eq!(item.latency_ms.load(Ordering::Relaxed), 120);
+    }
+
+    #[test]
+    fn test_protocol_segregation_exports_and_stats() {
+        let pool = ProxyPool::new();
+        let http_addr: SocketAddr = "10.0.0.1:8080".parse().unwrap();
+        let s4_addr: SocketAddr = "10.0.0.2:1080".parse().unwrap();
+        let s5_addr: SocketAddr = "10.0.0.3:1080".parse().unwrap();
+
+        pool.add(http_addr, ProxyProto::HttpConnect, None);
+        pool.add(s4_addr, ProxyProto::Socks4, None);
+        pool.add(s5_addr, ProxyProto::Socks5, None);
+
+        let stats = pool.stats();
+        assert_eq!(stats.healthy_proxies, 3);
+        assert_eq!(stats.healthy_http, 1);
+        assert_eq!(stats.healthy_socks4, 1);
+        assert_eq!(stats.healthy_socks5, 1);
+
+        let status = pool.api_status();
+        assert_eq!(status.healthy_by_proto.http, 1);
+        assert_eq!(status.healthy_by_proto.socks4, 1);
+        assert_eq!(status.healthy_by_proto.socks5, 1);
+
+        // Test export_by_proto returns raw host:port\n
+        let http_txt = pool.export_by_proto(ProxyProto::HttpConnect);
+        assert_eq!(http_txt, "10.0.0.1:8080\n");
+
+        let s4_txt = pool.export_by_proto(ProxyProto::Socks4);
+        assert_eq!(s4_txt, "10.0.0.2:1080\n");
+
+        let s5_txt = pool.export_by_proto(ProxyProto::Socks5);
+        assert_eq!(s5_txt, "10.0.0.3:1080\n");
+
+        // Checked conversion
+        let checked = pool.healthy_checked();
+        assert_eq!(checked.len(), 3);
     }
 }

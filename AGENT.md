@@ -204,6 +204,28 @@
   - `GET /live.txt`: Plain-text proxy stream.
 - [x] `looker-gateway`: High-end dark theme dashboard at `http://127.0.0.1:8080/ui` with auto-refreshing metrics, live progress bar, realtime fastest nodes list, and searchable proxy table.
 
+### Phase 7: Strict Protocol Segregation Across Exports, Gateway Endpoints, and Dashboard
+- [x] `looker-pool`: Protocol-segregated exports via `ProxyPool::export_by_proto` returning raw `host:port\n` for a specific protocol (healthy nodes only).
+- [x] `looker-pool`: Added `HealthyByProto` tracking per-protocol counts (`http`, `socks4`, `socks5`) in `PoolStats` and `ApiStatus`.
+- [x] `looker-pool`: Added `ProxyPool::healthy_checked(&self) -> Vec<CheckedProxy>` and `ProxyItem::to_checked(&self) -> CheckedProxy`.
+- [x] `looker-gateway`: Dedicated protocol feeds:
+  - `GET /http.txt`: Raw `host:port\n` lines of healthy HTTP proxies.
+  - `GET /socks4.txt`: Raw `host:port\n` lines of healthy SOCKS4 proxies.
+  - `GET /socks5.txt`: Raw `host:port\n` lines of healthy SOCKS5 proxies.
+  - `GET /all.txt` & `GET /live.txt` (alias): `proto://host:port\n` lines of all healthy proxies.
+  - `GET /api/status`: Rich status including `healthy_by_proto: { http: usize, socks4: usize, socks5: usize }`.
+- [x] `looker-proxy`: Structured disk output hierarchy matching production specifications on shutdown and on `looker-proxy scrape`:
+  ```
+  out/
+  ├── proxies.json
+  └── proxies/
+      ├── all.txt
+      ├── http.txt
+      ├── socks4.txt
+      └── socks5.txt
+  ```
+- [x] `looker-gateway/ui`: Modern protocol navigation with interactive pill filters (`[ All ] [ SOCKS5 ] [ SOCKS4 ] [ HTTP ]`) showing live counts, direct table filtering, header export badges (`all.txt`, `socks5.txt`, `socks4.txt`, `http.txt`), and per-protocol status breakdown.
+
 ---
 
 ## 5. Session Instructions for Future Agents

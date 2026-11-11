@@ -15,7 +15,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use looker_gateway::{GatewayConfig, ProxyGateway};
 use looker_geo::GeoResolver;
-use looker_pool::ProxyPool;
+use looker_pool::{CheckedProxy, ProxyPool};
+use looker_protocol::ProxyProto;
 use looker_scraper::{resolve_direct_ip, CheckerConfig, ProxyChecker, ProxyScraper, DEFAULT_SOURCES};
 
 #[derive(Parser, Debug)]
@@ -75,6 +76,48 @@ enum Commands {
         #[arg(long)]
         asn_db: Option<PathBuf>,
     },
+}
+
+fn export_disk_hierarchy(out_dir: &Path, proxies: &[CheckedProxy]) -> std::io::Result<()> {
+    fs::create_dir_all(out_dir)?;
+    let sub_dir = out_dir.join("proxies");
+    fs::create_dir_all(&sub_dir)?;
+
+    // 1. out/proxies.json
+    let json_path = out_dir.join("proxies.json");
+    let json_file = fs::File::create(&json_path)?;
+    serde_json::to_writer_pretty(json_file, proxies)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+    // 2. out/proxies/all.txt (proto://host:port)
+    let all_path = sub_dir.join("all.txt");
+    let mut all_file = fs::File::create(&all_path)?;
+    for p in proxies {
+        writeln!(all_file, "{}", p.to_url())?;
+    }
+
+    // 3. out/proxies/http.txt (host:port)
+    let http_path = sub_dir.join("http.txt");
+    let mut http_file = fs::File::create(&http_path)?;
+    for p in proxies.iter().filter(|p| p.proto == ProxyProto::HttpConnect) {
+        writeln!(http_file, "{}", p.addr)?;
+    }
+
+    // 4. out/proxies/socks4.txt (host:port)
+    let socks4_path = sub_dir.join("socks4.txt");
+    let mut socks4_file = fs::File::create(&socks4_path)?;
+    for p in proxies.iter().filter(|p| p.proto == ProxyProto::Socks4) {
+        writeln!(socks4_file, "{}", p.addr)?;
+    }
+
+    // 5. out/proxies/socks5.txt (host:port)
+    let socks5_path = sub_dir.join("socks5.txt");
+    let mut socks5_file = fs::File::create(&socks5_path)?;
+    for p in proxies.iter().filter(|p| p.proto == ProxyProto::Socks5) {
+        writeln!(socks5_file, "{}", p.addr)?;
+    }
+
+    Ok(())
 }
 
 fn init_geo_resolver(city_db: Option<&Path>, asn_db: Option<&Path>) -> Arc<GeoResolver> {
@@ -248,21 +291,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let gateway = ProxyGateway::new(config, Arc::clone(&pool));
             gateway.run_with_cancellation(cancel_token.clone()).await?;
 
-            // Graceful shutdown completed: export latest healthy proxy snapshot
+            // Graceful shutdown completed: export protocol-segregated proxy hierarchy
             let out_dir = Path::new("out");
-            if let Err(e) = fs::create_dir_all(out_dir) {
-                warn!("Could not create out/ directory on shutdown: {}", e);
-            } else {
-                let shutdown_file = out_dir.join("proxies_last_shutdown.txt");
-                let live_text = pool.export_live_text();
-                match fs::write(&shutdown_file, &live_text) {
-                    Ok(_) => info!(
-                        "Exported {} healthy proxies to {} on shutdown.",
-                        pool.healthy_count(),
-                        shutdown_file.display()
-                    ),
-                    Err(e) => warn!("Failed to write {}: {}", shutdown_file.display(), e),
-                }
+            let healthy = pool.healthy_checked();
+            match export_disk_hierarchy(out_dir, &healthy) {
+                Ok(_) => info!(
+                    "Exported {} healthy proxies to {}/ on shutdown (proxies.json & proxies/*.txt).",
+                    healthy.len(),
+                    out_dir.display()
+                ),
+                Err(e) => warn!("Failed to write proxy hierarchy to {}: {}", out_dir.display(), e),
             }
 
             info!("Looker proxy daemon exited cleanly.");
@@ -298,21 +336,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let verified = checker.check_all(candidates).await;
             info!("Successfully verified {} alive proxies", verified.len());
 
-            fs::create_dir_all(&output_dir)?;
-            let txt_path = output_dir.join("proxies.txt");
-            let json_path = output_dir.join("proxies.json");
-
-            // Write plain text feed (proto://addr)
-            let mut txt_file = fs::File::create(&txt_path)?;
-            for p in &verified {
-                writeln!(txt_file, "{}", p.to_url())?;
-            }
-            info!("Wrote plain text proxy list to {}", txt_path.display());
-
-            // Write detailed JSON dump
-            let json_file = fs::File::create(&json_path)?;
-            serde_json::to_writer_pretty(json_file, &verified)?;
-            info!("Wrote detailed JSON proxy dump to {}", json_path.display());
+            export_disk_hierarchy(&output_dir, &verified)?;
+            info!(
+                "Wrote protocol-segregated proxy hierarchy to {}/ (proxies.json & proxies/*.txt)",
+                output_dir.display()
+            );
 
             println!("\nTop 10 Fastest Verified Proxies:");
             println!("------------------------------------------------------------");
