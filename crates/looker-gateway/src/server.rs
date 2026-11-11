@@ -45,8 +45,13 @@ impl ProxyGateway {
     /// Launches the gateway server loop listening on `config.bind_addr`.
     pub async fn run(&self) -> Result<(), GatewayError> {
         let listener = TcpListener::bind(self.config.bind_addr).await?;
-        info!("Looker proxy gateway listening on http://{}", self.config.bind_addr);
+        let local_addr = listener.local_addr()?;
+        info!("Looker proxy gateway listening on http://{}", local_addr);
+        self.run_on_listener(listener).await
+    }
 
+    /// Runs the gateway accept loop on an already bound TcpListener.
+    pub async fn run_on_listener(&self, listener: TcpListener) -> Result<(), GatewayError> {
         loop {
             let (client_stream, client_addr) = match listener.accept().await {
                 Ok(conn) => conn,
@@ -68,7 +73,7 @@ impl ProxyGateway {
     }
 }
 
-fn configure_tcp_socket(stream: &TcpStream, buf_size: usize) {
+pub fn configure_tcp_socket(stream: &TcpStream, buf_size: usize) {
     let _ = stream.set_nodelay(true);
     let sock = SockRef::from(stream);
     let _ = sock.set_send_buffer_size(buf_size);
@@ -113,16 +118,43 @@ async fn handle_client(
 
     let mut parts = first_line.split_whitespace();
     let method = parts.next().ok_or(GatewayError::InvalidConnectRequest)?;
-    let target_str = parts.next().ok_or(GatewayError::InvalidConnectRequest)?;
+    let path_or_target = parts.next().ok_or(GatewayError::InvalidConnectRequest)?;
 
+    // Route 1: Local Live Proxy Feed (GET /live.txt)
+    if method.eq_ignore_ascii_case("GET") && path_or_target == "/live.txt" {
+        let text_feed = pool.export_live_text();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            text_feed.len(),
+            text_feed
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 2: Local Status Endpoint (GET /status)
+    if method.eq_ignore_ascii_case("GET") && path_or_target == "/status" {
+        let stats = pool.stats();
+        let json_body = serde_json::to_string_pretty(&stats).unwrap_or_else(|_| "{}".to_string());
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json_body.len(),
+            json_body
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 3: Transparent HTTP CONNECT Tunnel
     if !method.eq_ignore_ascii_case("CONNECT") {
-        // Looker gateway specializes in transparent HTTP CONNECT tunnels
-        let response = b"HTTP/1.1 405 Method Not Allowed\r\nAllow: CONNECT\r\n\r\n";
+        let response = b"HTTP/1.1 405 Method Not Allowed\r\nAllow: CONNECT, GET\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
         let _ = client_stream.write_all(response).await;
         return Err(GatewayError::InvalidConnectRequest);
     }
 
-    let target = TargetAddr::try_from(target_str)
+    let target = TargetAddr::try_from(path_or_target)
         .map_err(|_| GatewayError::InvalidConnectRequest)?;
 
     debug!("Client {} requested tunnel to {}", client_addr, target);
@@ -133,7 +165,7 @@ async fn handle_client(
     if candidates.is_empty() {
         warn!("No healthy proxies available in pool to service request to {}", target);
         let _ = client_stream
-            .write_all(b"HTTP/1.1 503 Service Unavailable\r\n\r\n")
+            .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")
             .await;
         return Err(GatewayError::NoProxies);
     }
@@ -212,7 +244,7 @@ async fn handle_client(
         None => {
             warn!("All {} proxy attempts failed for target {}", candidates.len(), target);
             let _ = client_stream
-                .write_all(b"HTTP/1.1 502 Bad Gateway\r\n\r\n")
+                .write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n")
                 .await;
             return Err(GatewayError::AllRetriesFailed(candidates.len()));
         }

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use reqwest::Client;
 use tokio::sync::Semaphore;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use crate::error::ScraperError;
 use crate::extractor::{CandidateExtractor, CandidateProxy};
@@ -26,7 +26,7 @@ impl Default for ProxyScraper {
 impl ProxyScraper {
     pub fn new() -> Self {
         let client = Client::builder()
-            .timeout(Duration::from_secs(15))
+            .timeout(Duration::from_secs(10))
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Looker/0.1")
             .build()
             .expect("Failed to build HTTP client for scraper");
@@ -35,7 +35,7 @@ impl ProxyScraper {
             client,
             extractor: Arc::new(CandidateExtractor::new()),
             sources: DEFAULT_SOURCES.to_vec(),
-            concurrency_limit: 8,
+            concurrency_limit: 12,
         }
     }
 
@@ -49,9 +49,10 @@ impl ProxyScraper {
         self
     }
 
-    /// Fetches all configured public sources concurrently and returns unique candidates.
-    pub async fn scrape_all(&self) -> Result<Vec<CandidateProxy>, ScraperError> {
-        info!("Starting public proxy scrape across {} sources", self.sources.len());
+    /// Concurrently fetches all configured public sources with strict 10-second timeouts,
+    /// extracts candidate tokens, deduplicates, and drops bogons.
+    pub async fn collect_all(&self) -> Result<Vec<CandidateProxy>, ScraperError> {
+        info!("Collecting proxy candidates from {} public sources (10s timeout)...", self.sources.len());
 
         let sem = Arc::new(Semaphore::new(self.concurrency_limit));
         let mut tasks = Vec::with_capacity(self.sources.len());
@@ -86,7 +87,7 @@ impl ProxyScraper {
                                 return extracted;
                             }
                         } else {
-                            error!(
+                            debug!(
                                 "Source '{}' returned HTTP status {}",
                                 source.name,
                                 resp.status()
@@ -94,7 +95,7 @@ impl ProxyScraper {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to fetch source '{}': {}", source.name, e);
+                        debug!("Failed to fetch source '{}': {}", source.name, e);
                     }
                 }
                 Vec::new()
@@ -111,7 +112,12 @@ impl ProxyScraper {
         }
 
         let result: Vec<CandidateProxy> = candidate_set.into_iter().collect();
-        info!("Scraped {} unique valid public proxy candidates", result.len());
+        info!("Collected {} unique valid public proxy candidates", result.len());
         Ok(result)
+    }
+
+    /// Alias for `collect_all`.
+    pub async fn scrape_all(&self) -> Result<Vec<CandidateProxy>, ScraperError> {
+        self.collect_all().await
     }
 }

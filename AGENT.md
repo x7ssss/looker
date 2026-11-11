@@ -144,12 +144,19 @@
 - [x] `looker-mega`: Dynamic chunk schedule iterator (128 KiB to 1 MiB cap).
 - [x] `looker-mega`: AES-128-CTR keystream & chunk CBC-MAC condensation.
 
-### Phase 2: Scraper, Pool & Gateway Daemon
-- [x] `looker-scraper`: Built-in public proxy sources (ProxyScrape, Monosans, TheSpeedX, Proxifly).
-- [x] `looker-scraper`: Regex & CIDR extraction engine with bogon IP filter.
-- [x] `looker-pool`: Concurrent proxy registry, latency moving averages, and atomic circuit breakers.
-- [x] `looker-gateway`: Local listener on `127.0.0.1:8080` with pre-commit retry loop.
-- [x] `looker-proxy`: CLI interface (`daemon`, `scrape`, `test`, `export`).
+### Phase 2: Active Validation Pipeline & Live Gateway Daemon
+- [x] `looker-scraper`: `collect_all` concurrent harvester across `DEFAULT_SOURCES` with strict 10s timeouts and bogon drops.
+- [x] `looker-scraper`: `ProxyChecker` bounded validation pipeline (500 max in-flight sockets via `Arc<Semaphore>`).
+- [x] `looker-scraper`: Direct IP leak baselining and 3-tier anonymity classification (`Transparent`, `Anonymous`, `Elite`).
+- [x] `looker-scraper`: Synchronous MaxMind GeoIP/ASN enrichment via `GeoResolver`.
+- [x] `looker-pool`: Dynamic registration via `add_or_update(CheckedProxy)`.
+- [x] `looker-pool`: Active circuit breaking (quarantines nodes after >= 2 failures) and lock-free selection.
+- [x] `looker-pool`: Live proxy text exporter (`export_live_text`) and JSON pool stats (`PoolStats`).
+- [x] `looker-gateway`: Pre-Commit Retry Rule (up to 4 upstream handshakes before committing `200 OK`).
+- [x] `looker-gateway`: Integrated `GET /live.txt` (plain text proxy feed) and `GET /status` (JSON stats).
+- [x] `looker-gateway`: Integration test suite (`retry_rule_test.rs`) verifying transparent retry and local endpoints.
+- [x] `looker-proxy`: Background daemon orchestrating 15-minute re-harvest, validation, quarantine re-checks, and gateway.
+- [x] `looker-proxy`: One-shot `scrape` command dumping verified proxies to `out/proxies.txt` and `out/proxies.json`.
 
 ### Phase 3: MEGA Engine & Downloader CLI
 - [ ] `looker-mega`: Storage node API communication (`g` command).

@@ -1,17 +1,18 @@
+use std::fs;
+use std::io::Write;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use looker_gateway::{GatewayConfig, ProxyGateway};
 use looker_geo::GeoResolver;
 use looker_pool::ProxyPool;
-use looker_protocol::ProxyProto;
-use looker_scraper::ProxyScraper;
+use looker_scraper::{resolve_direct_ip, CheckerConfig, ProxyChecker, ProxyScraper, DEFAULT_SOURCES};
 
 #[derive(Parser, Debug)]
 #[command(name = "looker-proxy", version, about = "High-speed rotating proxy infrastructure daemon")]
@@ -27,24 +28,65 @@ enum Commands {
         #[arg(short, long, default_value = "127.0.0.1:8080")]
         bind: SocketAddr,
 
-        #[arg(long, default_value_t = 300)]
+        /// Interval in seconds between background scraper runs (default: 15 min)
+        #[arg(long, default_value_t = 900)]
         scrape_interval: u64,
 
+        /// Maximum in-flight pre-commit retries per CONNECT request
         #[arg(long, default_value_t = 4)]
         max_retries: usize,
 
+        /// Maximum concurrent candidate sockets checked in validation pipeline
+        #[arg(long, default_value_t = 500)]
+        concurrency: usize,
+
+        /// Path to MaxMind GeoLite2-City.mmdb
         #[arg(long)]
         city_db: Option<PathBuf>,
 
+        /// Path to MaxMind GeoLite2-ASN.mmdb
         #[arg(long)]
         asn_db: Option<PathBuf>,
     },
 
-    /// Scrapes public sources once and displays discovered candidates
+    /// Scrapes public sources, checks candidates, and exports verified nodes to out/
     Scrape {
-        #[arg(short, long)]
-        output: Option<PathBuf>,
+        /// Destination directory for output dumps (out/proxies.txt, out/proxies.json)
+        #[arg(short, long, default_value = "out")]
+        output_dir: PathBuf,
+
+        /// Maximum concurrent candidate sockets checked in validation pipeline
+        #[arg(long, default_value_t = 500)]
+        concurrency: usize,
+
+        /// Path to MaxMind GeoLite2-City.mmdb
+        #[arg(long)]
+        city_db: Option<PathBuf>,
+
+        /// Path to MaxMind GeoLite2-ASN.mmdb
+        #[arg(long)]
+        asn_db: Option<PathBuf>,
     },
+}
+
+fn init_geo_resolver(city_db: Option<&Path>, asn_db: Option<&Path>) -> Arc<GeoResolver> {
+    // Check user-specified paths or local standard files
+    let default_city = Path::new("GeoLite2-City.mmdb");
+    let default_asn = Path::new("GeoLite2-ASN.mmdb");
+
+    let city_path = city_db.or_else(|| if default_city.exists() { Some(default_city) } else { None });
+    let asn_path = asn_db.or_else(|| if default_asn.exists() { Some(default_asn) } else { None });
+
+    match GeoResolver::from_paths(city_path, asn_path) {
+        Ok(resolver) => {
+            info!("GeoResolver loaded successfully (zero-copy memory-mapped)");
+            Arc::new(resolver)
+        }
+        Err(e) => {
+            warn!("GeoResolver offline database not loaded: {}. Running with empty geo.", e);
+            Arc::new(GeoResolver::empty())
+        }
+    }
 }
 
 #[tokio::main]
@@ -52,7 +94,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "looker=info,looker_proxy=info,looker_gateway=info".into()),
+                .unwrap_or_else(|_| "looker=info,looker_proxy=info,looker_gateway=info,looker_scraper=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -64,55 +106,89 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             bind,
             scrape_interval,
             max_retries,
+            concurrency,
             city_db,
             asn_db,
         } => {
-            info!("Starting Looker Rotating Proxy Daemon...");
+            println!("============================================================");
+            println!("     Looker Rotating Proxy Infrastructure Daemon           ");
+            println!("============================================================");
+            info!("Initializing daemon on http://{}...", bind);
 
-            let geo_resolver = Arc::new(
-                GeoResolver::from_paths(city_db.as_deref(), asn_db.as_deref())
-                    .unwrap_or_else(|e| {
-                        warn!("GeoResolver offline database not loaded: {}. Running with empty geo.", e);
-                        GeoResolver::empty()
-                    }),
-            );
+            let geo_resolver = init_geo_resolver(city_db.as_deref(), asn_db.as_deref());
+            let direct_ip = resolve_direct_ip().await;
+            info!("Direct client IP baseline: {:?}", direct_ip);
 
             let pool = Arc::new(ProxyPool::new().with_cooldown(Duration::from_secs(60)));
             let scraper = Arc::new(ProxyScraper::new());
 
-            // Initial scrape
+            let checker_config = CheckerConfig {
+                max_concurrency: concurrency,
+                timeout: Duration::from_secs(5),
+                target_authority: "cloudflare.com:443".to_string(),
+            };
+            let checker = Arc::new(ProxyChecker::with_config(
+                Arc::clone(&geo_resolver),
+                checker_config,
+                direct_ip,
+            ));
+
+            info!(
+                "Configured {} public proxy feeds across Monosans, ProxyScrape, TheSpeedX, Proxifly",
+                DEFAULT_SOURCES.len()
+            );
+
+            // Spawn background active validation pipeline
             let pool_clone = Arc::clone(&pool);
             let scraper_clone = Arc::clone(&scraper);
-            let geo_clone = Arc::clone(&geo_resolver);
+            let checker_clone = Arc::clone(&checker);
 
             tokio::spawn(async move {
                 loop {
-                    match scraper_clone.scrape_all().await {
-                        Ok(candidates) => {
-                            let mut added = 0;
-                            for c in candidates {
-                                let proto = c.proto.unwrap_or(ProxyProto::HttpConnect);
-                                let geo = geo_clone.lookup(c.addr.ip());
-                                if pool_clone.add(c.addr, proto, Some(geo)) {
-                                    added += 1;
-                                }
-                            }
-                            info!(
-                                "Pool refreshed: added {} new proxies. Total in pool: {}, Healthy: {}",
-                                added,
-                                pool_clone.total_count(),
-                                pool_clone.healthy_count()
-                            );
-                        }
+                    info!("Running periodic proxy harvest & validation pipeline...");
+
+                    // 1. Collect candidates from public sources
+                    let candidates = match scraper_clone.collect_all().await {
+                        Ok(c) => c,
                         Err(e) => {
-                            error!("Error running background scraper: {}", e);
+                            error!("Error collecting candidates: {}", e);
+                            Vec::new()
+                        }
+                    };
+
+                    // 2. Add quarantined items to re-check queue
+                    let mut all_to_check = candidates;
+                    let quarantined = pool_clone.list_quarantined();
+                    if !quarantined.is_empty() {
+                        debug!("Re-checking {} quarantined proxies...", quarantined.len());
+                        for q in quarantined {
+                            all_to_check.push(looker_scraper::CandidateProxy::new(q.addr, Some(q.proto)));
                         }
                     }
 
+                    // 3. Run validation pipeline
+                    if !all_to_check.is_empty() {
+                        let verified = checker_clone.check_all(all_to_check).await;
+                        for v in verified {
+                            pool_clone.add_or_update(v);
+                        }
+                    }
+
+                    let stats = pool_clone.stats();
+                    info!(
+                        "[POOL STATUS] Total: {}, Healthy/Active: {}, Quarantined: {}, Avg Latency: {} ms",
+                        stats.total_proxies,
+                        stats.healthy_proxies,
+                        stats.quarantined_proxies,
+                        stats.avg_latency_ms
+                    );
+
+                    info!("Next automated refresh scheduled in {} seconds", scrape_interval);
                     tokio::time::sleep(Duration::from_secs(scrape_interval)).await;
                 }
             });
 
+            // Start transparent gateway listener
             let config = GatewayConfig {
                 bind_addr: bind,
                 max_retries,
@@ -124,36 +200,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             gateway.run().await?;
         }
 
-        Commands::Scrape { output } => {
-            let scraper = ProxyScraper::new();
-            let candidates = scraper.scrape_all().await?;
-            info!("Total candidates scraped: {}", candidates.len());
+        Commands::Scrape {
+            output_dir,
+            concurrency,
+            city_db,
+            asn_db,
+        } => {
+            println!("============================================================");
+            println!("       Looker One-Shot Proxy Harvester & Validator         ");
+            println!("============================================================");
 
-            if let Some(path) = output {
-                use std::io::Write;
-                let mut file = std::fs::File::create(&path)?;
-                for c in &candidates {
-                    let proto_str = c
-                        .proto
-                        .map(|p| p.to_string())
-                        .unwrap_or_else(|| "http".to_string());
-                    writeln!(file, "{}://{}", proto_str, c.addr)?;
-                }
-                info!("Saved {} proxies to {}", candidates.len(), path.display());
-            } else {
-                for c in candidates.iter().take(20) {
-                    println!(
-                        "{}://{}",
-                        c.proto
-                            .map(|p| p.to_string())
-                            .unwrap_or_else(|| "http".to_string()),
-                        c.addr
-                    );
-                }
-                if candidates.len() > 20 {
-                    println!("... and {} more candidates", candidates.len() - 20);
-                }
+            let geo_resolver = init_geo_resolver(city_db.as_deref(), asn_db.as_deref());
+            let direct_ip = resolve_direct_ip().await;
+            info!("Direct client IP baseline: {:?}", direct_ip);
+
+            let scraper = ProxyScraper::new();
+            let candidates = scraper.collect_all().await?;
+            info!("Extracted {} unique bogon-filtered candidate proxies", candidates.len());
+
+            let checker_config = CheckerConfig {
+                max_concurrency: concurrency,
+                timeout: Duration::from_secs(5),
+                target_authority: "cloudflare.com:443".to_string(),
+            };
+            let checker = ProxyChecker::with_config(geo_resolver, checker_config, direct_ip);
+
+            let verified = checker.check_all(candidates).await;
+            info!("Successfully verified {} alive proxies", verified.len());
+
+            fs::create_dir_all(&output_dir)?;
+            let txt_path = output_dir.join("proxies.txt");
+            let json_path = output_dir.join("proxies.json");
+
+            // Write plain text feed (proto://addr)
+            let mut txt_file = fs::File::create(&txt_path)?;
+            for p in &verified {
+                writeln!(txt_file, "{}", p.to_url())?;
             }
+            info!("Wrote plain text proxy list to {}", txt_path.display());
+
+            // Write detailed JSON dump
+            let json_file = fs::File::create(&json_path)?;
+            serde_json::to_writer_pretty(json_file, &verified)?;
+            info!("Wrote detailed JSON proxy dump to {}", json_path.display());
+
+            println!("\nTop 10 Fastest Verified Proxies:");
+            println!("------------------------------------------------------------");
+            let mut sorted = verified;
+            sorted.sort_by_key(|p| p.latency);
+            for p in sorted.iter().take(10) {
+                let geo_str = p
+                    .geo
+                    .as_ref()
+                    .map(|g| g.to_string())
+                    .unwrap_or_else(|| "Unknown".to_string());
+                println!(
+                    "{:<25} | {:<12} | {:>4} ms | {}",
+                    p.to_url(),
+                    p.anonymity.to_string(),
+                    p.latency.as_millis(),
+                    geo_str
+                );
+            }
+            println!("------------------------------------------------------------");
+            println!("Done! Output saved to: {}", output_dir.display());
         }
     }
 

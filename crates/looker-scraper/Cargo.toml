@@ -7,11 +7,14 @@ license.workspace = true
 description = "Async public proxy source collector, regex/CIDR candidate extractor, and bogon filter"
 
 [dependencies]
-tokio = { workspace = true, features = ["net", "rt", "sync", "time"] }
+tokio = { workspace = true, features = ["net", "rt", "sync", "time", "io-util"] }
 reqwest = { workspace = true }
 regex = { workspace = true }
 ipnet = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+socket2 = { workspace = true }
 looker-protocol = { workspace = true }
+looker-geo = { workspace = true }
+looker-pool = { workspace = true }

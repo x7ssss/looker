@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 use rand::Rng;
 
 use crate::error::PoolError;
-use crate::item::ProxyItem;
+use crate::item::{AnonymityLevel, CheckedProxy, ProxyItem};
 use looker_geo::GeoInfo;
 use looker_protocol::ProxyProto;
 
@@ -17,6 +17,15 @@ pub enum SelectionStrategy {
     RoundRobin,
     LowestLatency,
     Random,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PoolStats {
+    pub total_proxies: usize,
+    pub healthy_proxies: usize,
+    pub quarantined_proxies: usize,
+    pub avg_latency_ms: u64,
+    pub total_requests: u64,
 }
 
 pub struct ProxyPool {
@@ -45,18 +54,52 @@ impl ProxyPool {
         self
     }
 
-    /// Adds a proxy to the pool if not already registered.
+    /// Adds or updates a checked proxy in the registry.
+    /// If existing, updates latency (EMA), resets consecutive failures, and marks healthy.
+    /// If new, registers the proxy in the active pool.
+    pub fn add_or_update(&self, proxy: CheckedProxy) {
+        let mut items = self.items.write();
+        if let Some(existing) = items
+            .iter()
+            .find(|i| i.addr == proxy.addr && i.proto == proxy.proto)
+        {
+            existing.record_success(proxy.latency);
+            existing.consecutive_failures.store(0, Ordering::Relaxed);
+            existing.healthy.store(true, Ordering::Release);
+            existing.circuit_open_until_epoch_ms.store(0, Ordering::Relaxed);
+        } else {
+            let item = ProxyItem::new(
+                proxy.addr,
+                proxy.proto,
+                proxy.latency,
+                proxy.anonymity,
+                proxy.exit_ip,
+                proxy.geo,
+            );
+            items.push(Arc::new(item));
+        }
+    }
+
+    /// Backwards-compatible simple registration.
     pub fn add(&self, addr: SocketAddr, proto: ProxyProto, geo: Option<GeoInfo>) -> bool {
         let mut items = self.items.write();
         if items.iter().any(|item| item.addr == addr && item.proto == proto) {
             return false;
         }
 
-        items.push(Arc::new(ProxyItem::new(addr, proto, geo)));
+        let item = ProxyItem::new(
+            addr,
+            proto,
+            Duration::ZERO,
+            AnonymityLevel::Elite,
+            None,
+            geo,
+        );
+        items.push(Arc::new(item));
         true
     }
 
-    /// Selects a healthy proxy according to the specified strategy.
+    /// Selects a healthy proxy according to the specified strategy without locking selection loops.
     pub fn select(&self, strategy: SelectionStrategy) -> Result<Arc<ProxyItem>, PoolError> {
         let items = self.items.read();
         let healthy: Vec<&Arc<ProxyItem>> = items.iter().filter(|i| i.is_healthy()).collect();
@@ -74,7 +117,7 @@ impl ProxyPool {
                 let best = healthy.iter().min_by_key(|i| {
                     let ms = i.latency_ms.load(Ordering::Relaxed);
                     if ms == 0 {
-                        u64::MAX // Unprobed proxies placed at end
+                        u64::MAX
                     } else {
                         ms
                     }
@@ -89,7 +132,7 @@ impl ProxyPool {
         }
     }
 
-    /// Returns a list of healthy proxies for multi-hop or retry loops.
+    /// Returns a list of healthy proxies sorted by latency for multi-candidate retry loops.
     pub fn get_healthy_candidates(&self, max_candidates: usize) -> Vec<Arc<ProxyItem>> {
         let items = self.items.read();
         let mut healthy: Vec<Arc<ProxyItem>> = items
@@ -98,7 +141,6 @@ impl ProxyPool {
             .map(Arc::clone)
             .collect();
 
-        // Sort: lowest latency first, then random order
         healthy.sort_by_key(|i| {
             let ms = i.latency_ms.load(Ordering::Relaxed);
             if ms == 0 {
@@ -112,6 +154,29 @@ impl ProxyPool {
         healthy
     }
 
+    /// Returns all currently healthy proxies.
+    pub fn list_healthy(&self) -> Vec<Arc<ProxyItem>> {
+        let items = self.items.read();
+        items.iter().filter(|i| i.is_healthy()).map(Arc::clone).collect()
+    }
+
+    /// Returns all quarantined (unhealthy) proxies for background re-validation.
+    pub fn list_quarantined(&self) -> Vec<Arc<ProxyItem>> {
+        let items = self.items.read();
+        items.iter().filter(|i| !i.is_healthy()).map(Arc::clone).collect()
+    }
+
+    /// Generates a live text feed formatted as `proto://host:port\n` for all healthy proxies.
+    pub fn export_live_text(&self) -> String {
+        let healthy = self.list_healthy();
+        let mut text = String::with_capacity(healthy.len() * 32);
+        for item in healthy {
+            text.push_str(&item.to_url());
+            text.push('\n');
+        }
+        text
+    }
+
     pub fn total_count(&self) -> usize {
         self.items.read().len()
     }
@@ -120,12 +185,61 @@ impl ProxyPool {
         self.items.read().iter().filter(|i| i.is_healthy()).count()
     }
 
+    pub fn quarantined_count(&self) -> usize {
+        self.items.read().iter().filter(|i| !i.is_healthy()).count()
+    }
+
     pub fn record_failure(&self, item: &ProxyItem) {
         item.record_failure(self.default_cooldown);
     }
 
+    pub fn record_failure_by_addr(&self, addr: SocketAddr, proto: ProxyProto) {
+        let items = self.items.read();
+        if let Some(item) = items.iter().find(|i| i.addr == addr && i.proto == proto) {
+            item.record_failure(self.default_cooldown);
+        }
+    }
+
     pub fn record_success(&self, item: &ProxyItem, latency: Duration) {
         item.record_success(latency);
+    }
+
+    pub fn stats(&self) -> PoolStats {
+        let items = self.items.read();
+        let total = items.len();
+        let mut healthy = 0;
+        let mut quarantined = 0;
+        let mut total_latency_ms: u64 = 0;
+        let mut latency_count: u64 = 0;
+        let mut total_requests: u64 = 0;
+
+        for item in items.iter() {
+            total_requests += item.total_requests.load(Ordering::Relaxed);
+            if item.is_healthy() {
+                healthy += 1;
+                let lat = item.latency_ms.load(Ordering::Relaxed);
+                if lat > 0 {
+                    total_latency_ms += lat;
+                    latency_count += 1;
+                }
+            } else {
+                quarantined += 1;
+            }
+        }
+
+        let avg_latency_ms = if latency_count > 0 {
+            total_latency_ms / latency_count
+        } else {
+            0
+        };
+
+        PoolStats {
+            total_proxies: total,
+            healthy_proxies: healthy,
+            quarantined_proxies: quarantined,
+            avg_latency_ms,
+            total_requests,
+        }
     }
 }
 
@@ -150,16 +264,48 @@ mod tests {
         let p2 = pool.select(SelectionStrategy::RoundRobin).unwrap();
         assert_ne!(p1.addr, p2.addr);
 
-        // Trip circuit breaker on p1 (3 failures)
-        pool.record_failure(&p1);
+        // Trip circuit breaker on p1 (2 failures per new spec)
         pool.record_failure(&p1);
         pool.record_failure(&p1);
 
         assert!(!p1.is_healthy());
         assert_eq!(pool.healthy_count(), 1);
+        assert_eq!(pool.quarantined_count(), 1);
 
         // Next selection must yield p2
         let p3 = pool.select(SelectionStrategy::RoundRobin).unwrap();
         assert_eq!(p3.addr, addr2);
+
+        // Live text export contains only p2
+        let live_txt = pool.export_live_text();
+        assert!(live_txt.contains("socks5://2.2.2.2:8080"));
+        assert!(!live_txt.contains("1.1.1.1:8080"));
+    }
+
+    #[test]
+    fn test_add_or_update_resurrects_quarantined() {
+        let pool = ProxyPool::new();
+        let addr: SocketAddr = "3.3.3.3:1080".parse().unwrap();
+        pool.add(addr, ProxyProto::Socks5, None);
+
+        let item = pool.select(SelectionStrategy::RoundRobin).unwrap();
+        pool.record_failure(&item);
+        pool.record_failure(&item);
+        assert!(!item.is_healthy());
+
+        // Resurrect via add_or_update
+        let checked = CheckedProxy {
+            addr,
+            proto: ProxyProto::Socks5,
+            latency: Duration::from_millis(120),
+            exit_ip: Some("3.3.3.3".parse().unwrap()),
+            anonymity: AnonymityLevel::Elite,
+            geo: None,
+        };
+        pool.add_or_update(checked);
+
+        assert!(item.is_healthy());
+        assert_eq!(pool.healthy_count(), 1);
+        assert_eq!(item.latency_ms.load(Ordering::Relaxed), 120);
     }
 }

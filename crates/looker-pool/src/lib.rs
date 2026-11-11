@@ -3,5 +3,5 @@ pub mod item;
 pub mod pool;
 
 pub use error::PoolError;
-pub use item::ProxyItem;
-pub use pool::{ProxyPool, SelectionStrategy};
+pub use item::{AnonymityLevel, CheckedProxy, ProxyItem};
+pub use pool::{PoolStats, ProxyPool, SelectionStrategy};
