@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -9,8 +10,12 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use reqwest::{Client, Proxy, StatusCode};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use looker_mega::{
     compute_chunk_mac, decrypt_ctr, ChunkInfo, ChunkIterator, ChunkMac, FileMacAccumulator,
@@ -19,6 +24,19 @@ use looker_mega::{
 
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_CHUNK_RETRIES: usize = 8;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ChunkResumeRecord {
+    pub index: usize,
+    pub mac: ChunkMac,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ResumeMetadata {
+    pub file_handle: String,
+    pub total_size: u64,
+    pub completed_chunks: Vec<ChunkResumeRecord>,
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "looker-down", version, about = "High-speed native multi-threaded MEGA downloader")]
@@ -229,13 +247,21 @@ async fn download_file_pipeline(
     concurrency: usize,
     route_display: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // 1. Pre-allocate target sparse file on disk (Zero intermediate temp files)
-    let std_file = std::fs::File::create(out_path)?;
+    let resume_path = PathBuf::from(format!("{}.looker-resume", out_path.display()));
+
+    // 1. Pre-allocate or open target sparse file on disk (Preserves resumed data)
+    let std_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(out_path)?;
     std_file.set_len(meta.size)?;
     drop(std_file);
 
     let shared_file = Arc::new(Mutex::new(
         tokio::fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .open(out_path)
             .await?,
@@ -245,7 +271,38 @@ async fn download_file_pipeline(
     let chunks: Vec<ChunkInfo> = ChunkIterator::new(meta.size).collect();
     let total_chunks = chunks.len();
 
-    // 3. Setup indicatif MultiProgress UI
+    let chunk_macs = Arc::new(Mutex::new(vec![None::<ChunkMac>; total_chunks]));
+    let completed_chunks = Arc::new(AtomicUsize::new(0));
+    let active_workers = Arc::new(AtomicUsize::new(0));
+
+    // 3. Inspect existing resume metadata
+    let mut resumed_indices = HashSet::new();
+    let mut resumed_bytes = 0u64;
+
+    if resume_path.exists() {
+        if let Ok(contents) = std::fs::read_to_string(&resume_path) {
+            if let Ok(saved) = serde_json::from_str::<ResumeMetadata>(&contents) {
+                if saved.file_handle == meta.handle && saved.total_size == meta.size {
+                    let mut lock = chunk_macs.lock().await;
+                    for rec in saved.completed_chunks {
+                        if rec.index < total_chunks {
+                            lock[rec.index] = Some(rec.mac);
+                            resumed_indices.insert(rec.index);
+                            resumed_bytes += chunks[rec.index].size;
+                        }
+                    }
+                    info!(
+                        "Resumed download session from {}: {}/{} chunks already complete",
+                        resume_path.display(),
+                        resumed_indices.len(),
+                        total_chunks
+                    );
+                }
+            }
+        }
+    }
+
+    // 4. Setup indicatif MultiProgress UI
     let mp = MultiProgress::new();
 
     let pb_main = mp.add(ProgressBar::new(meta.size));
@@ -255,6 +312,7 @@ async fn download_file_pipeline(
             .unwrap()
             .progress_chars("#>-"),
     );
+    pb_main.inc(resumed_bytes);
 
     let pb_status = mp.add(ProgressBar::new(total_chunks as u64));
     pb_status.set_style(
@@ -263,19 +321,28 @@ async fn download_file_pipeline(
             .unwrap(),
     );
     pb_status.set_message(format!(
-        "Chunks 0/{} | Concurrency: {} | {}",
-        total_chunks, concurrency, route_display
+        "Chunks {}/{} | Concurrency: {} | {}",
+        resumed_indices.len(), total_chunks, concurrency, route_display
     ));
 
-    // 4. Worker task queue channels
-    let (tx, rx) = mpsc::channel::<ChunkTask>(total_chunks + 32);
-    for chunk in chunks {
-        tx.send(ChunkTask { info: chunk, attempt: 0 }).await.unwrap();
-    }
+    // 5. Setup worker task queue & cancellation token
+    let cancel_token = CancellationToken::new();
+    let sig_token = cancel_token.clone();
 
-    let chunk_macs = Arc::new(Mutex::new(vec![None::<ChunkMac>; total_chunks]));
-    let completed_chunks = Arc::new(AtomicUsize::new(0));
-    let active_workers = Arc::new(AtomicUsize::new(0));
+    // Spawn signal listener for clean Ctrl-C shutdown
+    let signal_handle = tokio::spawn(async move {
+        if let Ok(()) = tokio::signal::ctrl_c().await {
+            sig_token.cancel();
+        }
+    });
+
+    let (tx, rx) = mpsc::channel::<ChunkTask>(total_chunks + 32);
+    for chunk in &chunks {
+        if !resumed_indices.contains(&chunk.index) {
+            tx.send(ChunkTask { info: *chunk, attempt: 0 }).await.unwrap();
+        }
+    }
+    completed_chunks.store(resumed_indices.len(), Ordering::Relaxed);
 
     let mut worker_handles = Vec::with_capacity(concurrency);
     let rx = Arc::new(Mutex::new(rx));
@@ -294,17 +361,23 @@ async fn download_file_pipeline(
         let completed = Arc::clone(&completed_chunks);
         let active = Arc::clone(&active_workers);
         let route_display = route_display.to_string();
+        let worker_cancel = cancel_token.child_token();
 
         worker_handles.push(tokio::spawn(async move {
             loop {
-                let task = {
-                    let mut lock = rx.lock().await;
-                    lock.recv().await
-                };
+                if worker_cancel.is_cancelled() {
+                    break;
+                }
 
-                let task = match task {
-                    Some(t) => t,
-                    None => break,
+                let task = tokio::select! {
+                    _ = worker_cancel.cancelled() => break,
+                    t = async {
+                        let mut lock = rx.lock().await;
+                        lock.recv().await
+                    } => match t {
+                        Some(item) => item,
+                        None => break,
+                    }
                 };
 
                 active.fetch_add(1, Ordering::Relaxed);
@@ -364,7 +437,13 @@ async fn download_file_pipeline(
                     Ok::<ChunkMac, MegaError>(mac)
                 };
 
-                let res = tokio::time::timeout(CHUNK_TIMEOUT, download_fut).await;
+                let res = tokio::select! {
+                    _ = worker_cancel.cancelled() => {
+                        active.fetch_sub(1, Ordering::Relaxed);
+                        break;
+                    }
+                    r = tokio::time::timeout(CHUNK_TIMEOUT, download_fut) => r,
+                };
 
                 active.fetch_sub(1, Ordering::Relaxed);
 
@@ -390,28 +469,28 @@ async fn download_file_pipeline(
                         debug!("Chunk {} quota limit (HTTP 509). Backing off and retrying...", chunk.index);
                         tokio::time::sleep(Duration::from_millis(500 * (task.attempt + 1) as u64)).await;
 
-                        if task.attempt < MAX_CHUNK_RETRIES {
+                        if task.attempt < MAX_CHUNK_RETRIES && !worker_cancel.is_cancelled() {
                             let _ = tx.send(ChunkTask { info: chunk, attempt: task.attempt + 1 }).await;
-                        } else {
+                        } else if !worker_cancel.is_cancelled() {
                             error!("Chunk {} failed after {} quota retries", chunk.index, MAX_CHUNK_RETRIES);
                             return Err(MegaError::OverQuota);
                         }
                     }
                     Ok(Err(e)) => {
                         debug!("Chunk {} error (attempt {}): {}", chunk.index, task.attempt + 1, e);
-                        if task.attempt < MAX_CHUNK_RETRIES {
+                        if task.attempt < MAX_CHUNK_RETRIES && !worker_cancel.is_cancelled() {
                             tokio::time::sleep(Duration::from_millis(250 * (task.attempt + 1) as u64)).await;
                             let _ = tx.send(ChunkTask { info: chunk, attempt: task.attempt + 1 }).await;
-                        } else {
+                        } else if !worker_cancel.is_cancelled() {
                             error!("Chunk {} permanently failed after {} retries: {}", chunk.index, MAX_CHUNK_RETRIES, e);
                             return Err(e);
                         }
                     }
                     Err(_) => {
                         debug!("Chunk {} timed out (> {:?}) on attempt {}", chunk.index, CHUNK_TIMEOUT, task.attempt + 1);
-                        if task.attempt < MAX_CHUNK_RETRIES {
+                        if task.attempt < MAX_CHUNK_RETRIES && !worker_cancel.is_cancelled() {
                             let _ = tx.send(ChunkTask { info: chunk, attempt: task.attempt + 1 }).await;
-                        } else {
+                        } else if !worker_cancel.is_cancelled() {
                             error!("Chunk {} permanently timed out after {} retries", chunk.index, MAX_CHUNK_RETRIES);
                             return Err(MegaError::ChunkDownloadFailed(MAX_CHUNK_RETRIES));
                         }
@@ -424,7 +503,46 @@ async fn download_file_pipeline(
     }
 
     for h in worker_handles {
-        h.await??;
+        let _ = h.await;
+    }
+    signal_handle.abort();
+
+    // Check if interrupted via Ctrl-C
+    if cancel_token.is_cancelled() {
+        // 1. Flush file to disk
+        {
+            let mut f = shared_file.lock().await;
+            let _ = f.flush().await;
+        }
+
+        // 2. Persist resume metadata
+        let macs = chunk_macs.lock().await;
+        let mut records = Vec::new();
+        for (idx, mac_opt) in macs.iter().enumerate() {
+            if let Some(mac) = mac_opt {
+                records.push(ChunkResumeRecord {
+                    index: idx,
+                    mac: *mac,
+                });
+            }
+        }
+
+        let resume_meta = ResumeMetadata {
+            file_handle: meta.handle.clone(),
+            total_size: meta.size,
+            completed_chunks: records,
+        };
+
+        if let Ok(json) = serde_json::to_string_pretty(&resume_meta) {
+            let _ = std::fs::write(&resume_path, json);
+            eprintln!("\n============================================================");
+            eprintln!(" [INTERRUPTED] Download gracefully halted on Ctrl-C.");
+            eprintln!(" [FLUSHED] In-memory chunks safely flushed to disk.");
+            eprintln!(" [RESUME] Metadata saved to: {}", resume_path.display());
+            eprintln!("============================================================");
+        }
+
+        return Err("Download interrupted by user (resume state saved)".into());
     }
 
     pb_main.finish_with_message("Transfer completed");
@@ -442,5 +560,11 @@ async fn download_file_pipeline(
     }
 
     accumulator.verify(meta.key.expected_mac)?;
+
+    // On complete verification, remove resume metadata file if present
+    if resume_path.exists() {
+        let _ = std::fs::remove_file(&resume_path);
+    }
+
     Ok(())
 }

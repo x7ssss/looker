@@ -70,32 +70,69 @@ impl ProxyGateway {
 
     /// Launches the gateway server loop listening on `config.bind_addr`.
     pub async fn run(&self) -> Result<(), GatewayError> {
+        self.run_with_cancellation(tokio_util::sync::CancellationToken::new()).await
+    }
+
+    /// Launches the gateway server loop listening on `config.bind_addr` with cancellation support.
+    pub async fn run_with_cancellation(
+        &self,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<(), GatewayError> {
         let listener = TcpListener::bind(self.config.bind_addr).await?;
         let local_addr = listener.local_addr()?;
         info!("Looker proxy gateway listening on http://{}", local_addr);
-        self.run_on_listener(listener).await
+        self.run_on_listener_with_cancellation(listener, cancel_token).await
     }
 
     /// Runs the gateway accept loop on an already bound TcpListener.
     pub async fn run_on_listener(&self, listener: TcpListener) -> Result<(), GatewayError> {
+        self.run_on_listener_with_cancellation(listener, tokio_util::sync::CancellationToken::new()).await
+    }
+
+    /// Runs the gateway accept loop on an already bound TcpListener with cancellation and in-flight tracking.
+    pub async fn run_on_listener_with_cancellation(
+        &self,
+        listener: TcpListener,
+        cancel_token: tokio_util::sync::CancellationToken,
+    ) -> Result<(), GatewayError> {
+        let tracker = tokio_util::task::TaskTracker::new();
+
         loop {
-            let (client_stream, client_addr) = match listener.accept().await {
-                Ok(conn) => conn,
-                Err(e) => {
-                    warn!("Error accepting incoming connection: {}", e);
-                    continue;
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    info!("Gateway listener received shutdown signal, stopping accept loop...");
+                    break;
                 }
-            };
+                res = listener.accept() => {
+                    let (client_stream, client_addr) = match res {
+                        Ok(conn) => conn,
+                        Err(e) => {
+                            warn!("Error accepting incoming connection: {}", e);
+                            continue;
+                        }
+                    };
 
-            let pool = Arc::clone(&self.pool);
-            let config = self.config.clone();
+                    let pool = Arc::clone(&self.pool);
+                    let config = self.config.clone();
 
-            tokio::spawn(async move {
-                if let Err(e) = handle_client(client_stream, client_addr, pool, config).await {
-                    debug!("Client {} finished with error: {}", client_addr, e);
+                    tracker.spawn(async move {
+                        if let Err(e) = handle_client(client_stream, client_addr, pool, config).await {
+                            debug!("Client {} finished with error: {}", client_addr, e);
+                        }
+                    });
                 }
-            });
+            }
         }
+
+        // Close tracker to disallow new connections
+        tracker.close();
+
+        // Allow active in-flight proxy gateway tunnels a 3-second grace window before hard aborting
+        info!("Waiting up to 3 seconds for active in-flight gateway tunnels to finish...");
+        let _ = tokio::time::timeout(Duration::from_secs(3), tracker.wait()).await;
+        info!("Gateway graceful shutdown completed.");
+
+        Ok(())
     }
 }
 

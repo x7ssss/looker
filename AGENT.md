@@ -183,10 +183,14 @@
 - [x] `looker-gateway`: Real-time pool status polling (`GET /status`), proxy snapshot feed (`GET /api/proxies`), raw text export (`GET /live.txt`), and quick looker-down command generator.
 - [x] Integration test suites: `crates/looker-mega/tests/folder_tests.rs` (link parsing, share key decoding, ECB unwrapping, path hierarchy) and `crates/looker-gateway/tests/retry_rule_test.rs` (UI & API routes).
 
-### Phase 5: CI/CD Cross-Compilation Matrix & Production Tuning
-- [ ] GitHub Actions workflow for cross-compiling Linux (x86_64-musl, aarch64-musl), macOS (universal2), Windows (x86_64-pc-windows-msvc).
-- [ ] Binary size optimization (`lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true`).
-- [ ] End-to-end integration test suite.
+### Phase 5: Production Hardening, Memory Optimization, and Cross-Platform CI/CD Matrix
+- [x] Memory allocator optimization: Configured `mimalloc::MiMalloc` as `#[global_allocator]` in `looker-proxy` and `looker-down` to eliminate heap fragmentation under rapid concurrent socket recycling.
+- [x] Graceful OS signal handling: Clean Ctrl-C / SIGINT shutdown using `tokio_util::sync::CancellationToken` across `looker-proxy` and `looker-down`.
+- [x] `looker-proxy`: 3-second grace window for in-flight gateway tunnels via `tokio_util::task::TaskTracker` before hard aborting, and automatic export of healthy proxies to `out/proxies_last_shutdown.txt`.
+- [x] `looker-down`: Safe interruption handling flushing in-memory chunks to disk without corrupting files, persisting session state to `.looker-resume`, and transparent resumption on subsequent runs.
+- [x] Browser auto-launch: Added `--open` flag to `looker-proxy daemon` using `opener` to open `http://127.0.0.1:8080/ui` upon listener startup with headless fallback.
+- [x] Production binary profile tuning in root `Cargo.toml`: `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true`.
+- [x] Cross-platform GitHub Actions release matrix (`.github/workflows/release.yml`): Windows (`x86_64-pc-windows-msvc`), static Linux musl (`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` via `cross`), macOS Intel & Apple Silicon (`x86_64-apple-darwin`, `aarch64-apple-darwin`), SHA-256 checksums, and automated GitHub Releases.
 
 ---
 

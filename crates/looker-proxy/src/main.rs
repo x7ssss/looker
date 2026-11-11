@@ -6,8 +6,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use looker_gateway::{GatewayConfig, ProxyGateway};
 use looker_geo::GeoResolver;
@@ -27,6 +31,10 @@ enum Commands {
     Daemon {
         #[arg(short, long, default_value = "127.0.0.1:8080")]
         bind: SocketAddr,
+
+        /// Automatically open the web dashboard in default browser on startup
+        #[arg(long, default_value_t = false)]
+        open: bool,
 
         /// Interval in seconds between background scraper runs (default: 15 min)
         #[arg(long, default_value_t = 900)]
@@ -104,6 +112,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Daemon {
             bind,
+            open,
             scrape_interval,
             max_retries,
             concurrency,
@@ -114,6 +123,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("     Looker Rotating Proxy Infrastructure Daemon           ");
             println!("============================================================");
             info!("Initializing daemon on http://{}...", bind);
+
+            let cancel_token = CancellationToken::new();
+
+            // Spawn OS signal listener (Ctrl-C / SIGINT)
+            let signal_token = cancel_token.clone();
+            tokio::spawn(async move {
+                if let Ok(()) = tokio::signal::ctrl_c().await {
+                    info!("Shutdown signal received (Ctrl-C). Initiating graceful shutdown...");
+                    signal_token.cancel();
+                }
+            });
 
             let geo_resolver = init_geo_resolver(city_db.as_deref(), asn_db.as_deref());
             let direct_ip = resolve_direct_ip().await;
@@ -138,13 +158,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 DEFAULT_SOURCES.len()
             );
 
-            // Spawn background active validation pipeline
+            // Spawn background active validation pipeline with cancellation support
             let pool_clone = Arc::clone(&pool);
             let scraper_clone = Arc::clone(&scraper);
             let checker_clone = Arc::clone(&checker);
+            let scraper_cancel = cancel_token.child_token();
 
             tokio::spawn(async move {
                 loop {
+                    if scraper_cancel.is_cancelled() {
+                        debug!("Background scraper loop stopped.");
+                        break;
+                    }
+
                     info!("Running periodic proxy harvest & validation pipeline...");
 
                     // 1. Collect candidates from public sources
@@ -184,11 +210,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
 
                     info!("Next automated refresh scheduled in {} seconds", scrape_interval);
-                    tokio::time::sleep(Duration::from_secs(scrape_interval)).await;
+
+                    tokio::select! {
+                        _ = scraper_cancel.cancelled() => {
+                            debug!("Background scraper loop cancelled.");
+                            break;
+                        }
+                        _ = tokio::time::sleep(Duration::from_secs(scrape_interval)) => {}
+                    }
                 }
             });
 
-            // Start transparent gateway listener
+            // Auto-launch web dashboard in default browser if requested
+            if open {
+                let dashboard_url = format!("http://{}/ui", bind);
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    match opener::open(&dashboard_url) {
+                        Ok(_) => info!("Dashboard opened in default browser: {}", dashboard_url),
+                        Err(e) => info!(
+                            "Dashboard available at {} (could not launch browser: {})",
+                            dashboard_url, e
+                        ),
+                    }
+                });
+            }
+
+            // Start transparent gateway listener with cancellation support
             let config = GatewayConfig {
                 bind_addr: bind,
                 max_retries,
@@ -196,8 +244,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 buffer_size: 16384,
             };
 
-            let gateway = ProxyGateway::new(config, pool);
-            gateway.run().await?;
+            let gateway = ProxyGateway::new(config, Arc::clone(&pool));
+            gateway.run_with_cancellation(cancel_token.clone()).await?;
+
+            // Graceful shutdown completed: export latest healthy proxy snapshot
+            let out_dir = Path::new("out");
+            if let Err(e) = fs::create_dir_all(out_dir) {
+                warn!("Could not create out/ directory on shutdown: {}", e);
+            } else {
+                let shutdown_file = out_dir.join("proxies_last_shutdown.txt");
+                let live_text = pool.export_live_text();
+                match fs::write(&shutdown_file, &live_text) {
+                    Ok(_) => info!(
+                        "Exported {} healthy proxies to {} on shutdown.",
+                        pool.healthy_count(),
+                        shutdown_file.display()
+                    ),
+                    Err(e) => warn!("Failed to write {}: {}", shutdown_file.display(), e),
+                }
+            }
+
+            info!("Looker proxy daemon exited cleanly.");
         }
 
         Commands::Scrape {

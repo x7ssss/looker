@@ -43,6 +43,9 @@ socket2 = { version = "0.5", features = ["all"] }
 parking_lot = "0.12"
 rand = "0.8"
 rust-embed = { version = "8.14", features = ["mime-guess"] }
+mimalloc = { version = "0.1", default-features = false }
+opener = "0.7"
+tokio-util = { version = "0.7", features = ["rt"] }
 
 looker-protocol = { path = "crates/looker-protocol" }
 looker-geo = { path = "crates/looker-geo" }
@@ -50,3 +53,10 @@ looker-scraper = { path = "crates/looker-scraper" }
 looker-pool = { path = "crates/looker-pool" }
 looker-gateway = { path = "crates/looker-gateway" }
 looker-mega = { path = "crates/looker-mega" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
