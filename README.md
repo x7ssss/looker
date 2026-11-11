@@ -97,12 +97,19 @@ Legacy tools such as **MegaBasterd** pioneered proxy-based quota bypassing for M
 | **`looker-mega`** | [`crates/looker-mega`](file:///crates/looker-mega) | MEGA.nz API client, key derivation, AES-128-CTR decryption, CBC-MAC. |
 | **`looker-proxy`** | [`crates/looker-proxy`](file:///crates/looker-proxy) | Daemon & CLI binary: scraper + pool + gateway + file exporter. |
 | **`looker-down`** | [`crates/looker-down`](file:///crates/looker-down) | Native CLI downloader: parallel chunking through local gateway. |
+| **`looker-app`** | [`crates/looker-app`](file:///crates/looker-app) | Native desktop shell & Windows system tray daemon (Tauri v2). |
 
 ---
 
 ## 🚦 Quickstart Guide
 
-### 1. Build from Source
+### 1. Native Windows Desktop Installer
+Download and run the standalone **`Looker_x64-setup.exe`** from GitHub Releases:
+- Runs as a clean native desktop shell with system tray background persistence.
+- Closing or minimizing the window keeps the rotating proxy gateway running at `http://127.0.0.1:8080`.
+- System tray context menu provides one-click access to "Show Looker", "Open live.txt", and clean shutdown.
+
+### 2. Build from Source
 Ensure you have a recent Rust toolchain installed (1.80+):
 ```bash
 git clone https://github.com/looker-rs/looker.git
@@ -110,7 +117,7 @@ cd looker
 cargo build --release
 ```
 
-### 2. Start the Rotating Proxy Gateway Daemon
+### 3. Start the Rotating Proxy Gateway Daemon (CLI)
 Launch the background proxy aggregator, embedded web dashboard, and gateway listener on `127.0.0.1:8080`:
 ```bash
 ./target/release/looker-proxy daemon --bind 127.0.0.1:8080 --scrape-interval 300
@@ -118,6 +125,7 @@ Launch the background proxy aggregator, embedded web dashboard, and gateway list
 
 - **Web Dashboard:** Open [`http://127.0.0.1:8080/ui`](http://127.0.0.1:8080/ui) in any browser for live pool metrics, latency graphs, node health, and one-click downloader commands.
 - **Live Proxy Feed:** [`http://127.0.0.1:8080/live.txt`](http://127.0.0.1:8080/live.txt)
+- **Dedicated Protocol Feeds:** [`/socks5.txt`](http://127.0.0.1:8080/socks5.txt), [`/socks4.txt`](http://127.0.0.1:8080/socks4.txt), [`/http.txt`](http://127.0.0.1:8080/http.txt)
 - **JSON Pool Stats:** [`http://127.0.0.1:8080/status`](http://127.0.0.1:8080/status)
 
 Verify the proxy gateway via command-line:
@@ -125,7 +133,7 @@ Verify the proxy gateway via command-line:
 curl -x http://127.0.0.1:8080 https://api.ipify.org
 ```
 
-### 3. Download Files & Entire Public Folders from MEGA
+### 4. Download Files & Entire Public Folders from MEGA (CLI or Web UI)
 Download any public MEGA file or entire folder tree at wire speed through the rotating gateway:
 ```bash
 # Download a single file:

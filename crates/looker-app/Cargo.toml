@@ -1,0 +1,27 @@
+[package]
+name = "looker-app"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Native desktop shell wrapping Looker daemon and UI (Tauri v2)"
+
+[[bin]]
+name = "looker-app"
+path = "src/main.rs"
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+looker-gateway = { path = "../looker-gateway" }
+looker-pool = { path = "../looker-pool" }
+looker-scraper = { path = "../looker-scraper" }
+looker-geo = { path = "../looker-geo" }
+tokio = { workspace = true, features = ["full"] }
+mimalloc = { workspace = true }
+opener = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio-util = { workspace = true }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

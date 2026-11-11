@@ -242,6 +242,20 @@
   - Active download task cards with animated progress bar, real-time speed, ETA, status pills, and cancellation controls.
   - Server-side protocol filtering on tab clicks (`/api/proxies?proto=...`).
 
+### Phase 9: Native Desktop Shell & NSIS Setup Wizard (Tauri v2)
+- [x] `looker-app`: Created native desktop application crate with Tauri v2 (`crates/looker-app`) wrapping the Looker gateway daemon, pool engine, and embedded UI into a native Windows window (WebView2).
+- [x] `looker-app/tauri.conf.json`: Configured window properties (1280x800, min 900x600, centered, dark theme), icon assets (`icon.ico`, `icon.png`, `32x32`, `128x128`, `128x128@2x`), and NSIS installer target (`bundle.targets: ["nsis"]`).
+- [x] `looker-app/src/main.rs`:
+  - Suppressed console window in release builds with `#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]`.
+  - Integrated `mimalloc` as global memory allocator.
+  - Spawns background scraper & validation engine and local gateway server on `127.0.0.1:8080` using `tauri::async_runtime::spawn`.
+  - Implemented window close interception (`WindowEvent::CloseRequested` -> `prevent_close()` and `window.hide()`) so closing the window minimizes to tray without dropping background proxy services or downloads.
+  - Configured Windows system tray with context menu items: "Show Looker", "Open live.txt", and "Quit Looker" (with graceful proxy pool persistence to `out/proxies_last_shutdown.txt`).
+  - Left-clicking system tray icon restores and focuses main window.
+- [x] CI/CD Workflow (`.github/workflows/release.yml`):
+  - Updated Windows release matrix to install Tauri CLI and build the NSIS installer via `cargo tauri build --target x86_64-pc-windows-msvc --bundles nsis`.
+  - Packages standalone NSIS installer as `Looker_x64-setup.exe` in `dist/` alongside portable zip archives and SHA-256 checksums.
+
 ---
 
 ## 5. Session Instructions for Future Agents

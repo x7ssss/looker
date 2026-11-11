@@ -8,6 +8,7 @@ members = [
     "crates/looker-mega",
     "crates/looker-proxy",
     "crates/looker-down",
+    "crates/looker-app",
 ]
 resolver = "2"
 

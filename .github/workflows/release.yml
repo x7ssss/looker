@@ -58,11 +58,26 @@ jobs:
 
       - name: Build release binaries (cross)
         if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }}
+        run: cross build --release --target ${{ matrix.target }} -p looker-proxy -p looker-down
 
-      - name: Build release binaries (native cargo)
-        if: "!matrix.use_cross"
+      - name: Build release binaries (native cargo - Unix)
+        if: "!matrix.use_cross && matrix.os != 'windows-latest'"
+        run: cargo build --release --target ${{ matrix.target }} -p looker-proxy -p looker-down
+
+      - name: Build release binaries (native cargo - Windows)
+        if: matrix.os == 'windows-latest'
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Install Tauri CLI (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo install tauri-cli --version ^2.0 --locked
+
+      - name: Build Tauri NSIS installer (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          cd crates/looker-app
+          cargo tauri build --target ${{ matrix.target }} --bundles nsis
 
       - name: Package artifacts (Windows)
         if: matrix.os == 'windows-latest'
@@ -77,6 +92,18 @@ jobs:
           Copy-Item "README.md" -Destination "dist/$ARCHIVE_NAME/"
           Copy-Item "AGENT.md" -Destination "dist/$ARCHIVE_NAME/"
           Compress-Archive -Path "dist/$ARCHIVE_NAME" -DestinationPath "dist/$ARCHIVE_NAME.zip" -Force
+
+          # Find and copy generated NSIS setup installer to dist/Looker_x64-setup.exe
+          $NSIS_SETUP = Get-ChildItem -Path "target/${{ matrix.target }}/release/bundle/nsis/*setup*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if (-not $NSIS_SETUP) {
+              $NSIS_SETUP = Get-ChildItem -Path "target/release/bundle/nsis/*setup*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          }
+          if ($NSIS_SETUP) {
+              Copy-Item $NSIS_SETUP.FullName -Destination "dist/Looker_x64-setup.exe"
+              Write-Host "Successfully packaged NSIS installer: dist/Looker_x64-setup.exe"
+          } else {
+              Write-Warning "No NSIS setup installer found in target bundle directory!"
+          }
 
       - name: Package artifacts (Unix)
         if: matrix.os != 'windows-latest'
