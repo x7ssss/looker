@@ -13,6 +13,32 @@ use looker_protocol::{
     handshake_http_connect, handshake_socks4, handshake_socks5, ProxyProto, TargetAddr,
 };
 
+#[derive(rust_embed::RustEmbed)]
+#[folder = "ui/dist"]
+struct Asset;
+
+fn mime_type_for(path: &str) -> &'static str {
+    if path.ends_with(".html") || path.ends_with(".htm") {
+        "text/html; charset=utf-8"
+    } else if path.ends_with(".css") {
+        "text/css; charset=utf-8"
+    } else if path.ends_with(".js") {
+        "application/javascript; charset=utf-8"
+    } else if path.ends_with(".json") {
+        "application/json; charset=utf-8"
+    } else if path.ends_with(".svg") {
+        "image/svg+xml"
+    } else if path.ends_with(".png") {
+        "image/png"
+    } else if path.ends_with(".ico") {
+        "image/x-icon"
+    } else if path.ends_with(".txt") {
+        "text/plain; charset=utf-8"
+    } else {
+        "application/octet-stream"
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
     pub bind_addr: SocketAddr,
@@ -145,6 +171,53 @@ async fn handle_client(
         client_stream.write_all(resp.as_bytes()).await?;
         client_stream.flush().await?;
         return Ok(());
+    }
+
+    // Route: Proxy Pool Snapshot API (GET /api/proxies)
+    if method.eq_ignore_ascii_case("GET") && path_or_target == "/api/proxies" {
+        let snapshot = pool.snapshot();
+        let json_body = serde_json::to_string(&snapshot).unwrap_or_else(|_| "[]".to_string());
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json_body.len(),
+            json_body
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route: Embedded Dashboard UI (GET /ui, GET /ui/*, GET /)
+    if method.eq_ignore_ascii_case("GET")
+        && (path_or_target == "/"
+            || path_or_target == "/ui"
+            || path_or_target == "/ui/"
+            || path_or_target.starts_with("/ui/"))
+    {
+        let rel_path = if path_or_target == "/" || path_or_target == "/ui" || path_or_target == "/ui/" {
+            "index.html"
+        } else {
+            path_or_target.trim_start_matches("/ui/").trim_start_matches('/')
+        };
+
+        let file_opt = Asset::get(rel_path).or_else(|| Asset::get("index.html"));
+        if let Some(file) = file_opt {
+            let content_type = mime_type_for(rel_path);
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                content_type,
+                file.data.len()
+            );
+            client_stream.write_all(resp.as_bytes()).await?;
+            client_stream.write_all(&file.data).await?;
+            client_stream.flush().await?;
+            return Ok(());
+        } else {
+            let resp = b"HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nNot Found";
+            client_stream.write_all(resp).await?;
+            client_stream.flush().await?;
+            return Ok(());
+        }
     }
 
     // Route 3: Transparent HTTP CONNECT Tunnel

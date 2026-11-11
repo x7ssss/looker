@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 use rand::Rng;
 
 use crate::error::PoolError;
-use crate::item::{AnonymityLevel, CheckedProxy, ProxyItem};
+use crate::item::{AnonymityLevel, CheckedProxy, ProxyItem, ProxySnapshot};
 use looker_geo::GeoInfo;
 use looker_protocol::ProxyProto;
 
@@ -187,6 +187,12 @@ impl ProxyPool {
 
     pub fn quarantined_count(&self) -> usize {
         self.items.read().iter().filter(|i| !i.is_healthy()).count()
+    }
+
+    /// Returns a point-in-time serializable snapshot of all proxies in the pool.
+    pub fn snapshot(&self) -> Vec<ProxySnapshot> {
+        let items = self.items.read();
+        items.iter().map(|i| i.snapshot()).collect()
     }
 
     pub fn record_failure(&self, item: &ProxyItem) {

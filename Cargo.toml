@@ -42,6 +42,7 @@ indicatif = "0.17"
 socket2 = { version = "0.5", features = ["all"] }
 parking_lot = "0.12"
 rand = "0.8"
+rust-embed = { version = "8.14", features = ["mime-guess"] }
 
 looker-protocol = { path = "crates/looker-protocol" }
 looker-geo = { path = "crates/looker-geo" }

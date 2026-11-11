@@ -171,7 +171,19 @@
 - [x] `looker-down`: Multi-progress `indicatif` UI rendering instantaneous transfer speed, ETA, chunk completion counters, and active proxy gateway indicators.
 - [x] `looker-down`: Standalone CLI supporting `--output`, `--concurrency`, `--gateway`, and `--direct`.
 
-### Phase 4: CI/CD Cross-Compilation Matrix & Production Tuning
+### Phase 4: Public Folder Engine & Modern Dashboard Integration
+- [x] `looker-mega`: Support parsing modern public folder URLs (`/folder/{id}#{key}`), subfile URLs (`/folder/{id}#{key}/file/{file_id}`), and legacy folder URLs (`/#F!{id}!{key}`).
+- [x] `looker-mega`: 16-byte folder share key parser from Base64URL (`parse_folder_share_key`).
+- [x] `looker-mega`: `MegaClient::fetch_folder_tree` querying `POST https://g.api.mega.co.nz/cs?id={seq}&n={folder_id}` with `[{"a":"f","c":1,"r":1,"ca":1}]`.
+- [x] `looker-mega`: Node key unwrapping via AES-128-ECB (`unwrap_node_key`): 16-byte attribute keys for folders (`t = 1`), 32-byte keys for files (`t = 0`) folded into 16-byte AES key, 8-byte nonce, and expected MAC words.
+- [x] `looker-mega`: Hierarchical folder tree parsing (`parse_folder_tree`) reconstructing nested directories and relative disk paths (`MegaFolderTree`, `MegaFolderNode`).
+- [x] `looker-mega`: `MegaClient::get_folder_file_url` querying storage URL with `[{"a":"g","g":1,"n":"{handle}","ssl":2}]` (clean-room invariant: NEVER passing `"v":2`).
+- [x] `looker-down`: Recursive batch folder download engine: pre-creates directory hierarchy, resolves URLs for each file node, runs downloads through parallel worker pool with sparse allocation, AES-128-CTR decryption, and CBC-MAC checksum validation.
+- [x] `looker-gateway`: Embedded dark-mode single-page dashboard using `rust-embed` (`#[folder = "ui/dist"]`) served on `GET /ui`, `GET /ui/*`, and `GET /`.
+- [x] `looker-gateway`: Real-time pool status polling (`GET /status`), proxy snapshot feed (`GET /api/proxies`), raw text export (`GET /live.txt`), and quick looker-down command generator.
+- [x] Integration test suites: `crates/looker-mega/tests/folder_tests.rs` (link parsing, share key decoding, ECB unwrapping, path hierarchy) and `crates/looker-gateway/tests/retry_rule_test.rs` (UI & API routes).
+
+### Phase 5: CI/CD Cross-Compilation Matrix & Production Tuning
 - [ ] GitHub Actions workflow for cross-compiling Linux (x86_64-musl, aarch64-musl), macOS (universal2), Windows (x86_64-pc-windows-msvc).
 - [ ] Binary size optimization (`lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = true`).
 - [ ] End-to-end integration test suite.

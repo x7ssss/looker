@@ -111,20 +111,28 @@ cargo build --release
 ```
 
 ### 2. Start the Rotating Proxy Gateway Daemon
-Launch the background proxy aggregator and gateway listener on `127.0.0.1:8080`:
+Launch the background proxy aggregator, embedded web dashboard, and gateway listener on `127.0.0.1:8080`:
 ```bash
 ./target/release/looker-proxy daemon --bind 127.0.0.1:8080 --scrape-interval 300
 ```
 
-Verify that the proxy gateway is live:
+- **Web Dashboard:** Open [`http://127.0.0.1:8080/ui`](http://127.0.0.1:8080/ui) in any browser for live pool metrics, latency graphs, node health, and one-click downloader commands.
+- **Live Proxy Feed:** [`http://127.0.0.1:8080/live.txt`](http://127.0.0.1:8080/live.txt)
+- **JSON Pool Stats:** [`http://127.0.0.1:8080/status`](http://127.0.0.1:8080/status)
+
+Verify the proxy gateway via command-line:
 ```bash
 curl -x http://127.0.0.1:8080 https://api.ipify.org
 ```
 
-### 3. Download from MEGA with Maximum Throughput
-Download any public MEGA link at high speed using multi-connection chunking through the rotating gateway:
+### 3. Download Files & Entire Public Folders from MEGA
+Download any public MEGA file or entire folder tree at wire speed through the rotating gateway:
 ```bash
-./target/release/looker-down "https://mega.nz/file/xxxx#yyyy" -o output.bin --concurrency 8
+# Download a single file:
+./target/release/looker-down "https://mega.nz/file/xxxx#yyyy" -o output.bin --workers 16
+
+# Download a complete folder tree (recursively recreates directory structure):
+./target/release/looker-down "https://mega.nz/folder/xxxx#yyyy" -o ./downloads/ --workers 16
 ```
 
 ---

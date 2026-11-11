@@ -1,5 +1,5 @@
 use std::io::SeekFrom;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -14,7 +14,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use looker_mega::{
     compute_chunk_mac, decrypt_ctr, ChunkInfo, ChunkIterator, ChunkMac, FileMacAccumulator,
-    MegaClient, MegaError, MegaLink,
+    FileMetadata, MegaClient, MegaError, MegaLink,
 };
 
 const CHUNK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -23,10 +23,10 @@ const MAX_CHUNK_RETRIES: usize = 8;
 #[derive(Parser, Debug)]
 #[command(name = "looker-down", version, about = "High-speed native multi-threaded MEGA downloader")]
 struct Args {
-    /// MEGA.nz public URL (e.g., https://mega.nz/file/xxxx#yyyy)
+    /// MEGA.nz public URL (single file or folder, e.g. https://mega.nz/folder/xxxx#yyyy or https://mega.nz/file/xxxx#yyyy)
     url: String,
 
-    /// Destination output path or directory (defaults to decrypted remote filename)
+    /// Destination output path or directory (defaults to remote file/folder name)
     #[arg(short, long)]
     output: Option<PathBuf>,
 
@@ -95,56 +95,157 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     info!("{}", route_status);
-    info!("Resolving file metadata via MEGA API...");
 
     let mega = MegaClient::new(gateway_url);
-    let meta = mega.resolve_file(&link).await?;
 
-    // Determine target output path
-    let out_path = match args.output {
-        Some(p) => {
-            if p.is_dir() || p.to_string_lossy().ends_with('/') || p.to_string_lossy().ends_with('\\') {
-                p.join(&meta.name)
-            } else {
-                p
-            }
-        }
-        None => PathBuf::from(&meta.name),
-    };
-
-    if let Some(parent) = out_path.parent() {
-        if !parent.as_os_str().is_empty() {
-            tokio::fs::create_dir_all(parent).await?;
+    // Build HTTP client for workers
+    let mut http_builder = Client::builder().timeout(CHUNK_TIMEOUT);
+    if let Some(gw) = gateway_url {
+        if let Ok(proxy) = Proxy::all(gw) {
+            http_builder = http_builder.proxy(proxy);
         }
     }
+    let http = Arc::new(http_builder.build()?);
 
-    println!("File Name   : {}", meta.name);
-    println!("File Size   : {} bytes ({:.2} MB)", meta.size, meta.size as f64 / (1024.0 * 1024.0));
-    println!("File Handle : {}", meta.handle);
-    println!("Destination : {}", out_path.display());
-    println!("Workers     : {} concurrent slots", args.concurrency);
-    println!("Proxy Route : {}", route_status);
-    println!("============================================================");
+    if link.is_folder() {
+        // ============================================================
+        // PUBLIC FOLDER BATCH DOWNLOAD
+        // ============================================================
+        info!("Resolving public folder tree via MEGA API...");
+        let tree = mega.fetch_folder_tree(&link).await?;
 
-    // 2. Pre-allocate target sparse file on disk (Zero intermediate temp files)
-    info!("Pre-allocating {} bytes on disk...", meta.size);
-    let std_file = std::fs::File::create(&out_path)?;
+        let base_out_dir = match args.output {
+            Some(p) => p,
+            None => PathBuf::from(&link.handle),
+        };
+
+        println!("Folder Handle : {}", tree.folder_handle);
+        println!("Directories   : {} folders", tree.directories().len());
+        println!("Files         : {} items", tree.files().len());
+        println!(
+            "Total Payload : {} bytes ({:.2} MB)",
+            tree.total_bytes(),
+            tree.total_bytes() as f64 / (1024.0 * 1024.0)
+        );
+        println!("Destination   : {}", base_out_dir.display());
+        println!("Proxy Route   : {}", route_status);
+        println!("============================================================");
+
+        // Pre-create all subdirectories on disk
+        tokio::fs::create_dir_all(&base_out_dir).await?;
+        for dir in tree.directories() {
+            let dir_path = base_out_dir.join(&dir.relative_path);
+            tokio::fs::create_dir_all(&dir_path).await?;
+        }
+
+        let files = tree.files();
+        let total_files = files.len();
+
+        for (idx, file_node) in files.iter().enumerate() {
+            println!(
+                "\n[{}/{}] Downloading: {} ({:.2} MB)",
+                idx + 1,
+                total_files,
+                file_node.relative_path.display(),
+                file_node.size as f64 / (1024.0 * 1024.0)
+            );
+
+            let (download_url, _) = mega
+                .get_folder_file_url(&link.handle, &file_node.handle)
+                .await?;
+
+            let target_path = base_out_dir.join(&file_node.relative_path);
+            if let Some(parent) = target_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+
+            let file_key = file_node
+                .key
+                .clone()
+                .ok_or_else(|| format!("Missing key for node {}", file_node.handle))?;
+
+            let meta = FileMetadata {
+                handle: file_node.handle.clone(),
+                name: file_node.name.clone(),
+                size: file_node.size,
+                download_url,
+                key: file_key,
+            };
+
+            download_file_pipeline(&meta, &target_path, Arc::clone(&http), args.concurrency, &route_status).await?;
+        }
+
+        println!("\n============================================================");
+        println!(" Folder Download Complete: All {} files verified", total_files);
+        println!(" Destination directory   : {}", base_out_dir.display());
+        println!("============================================================");
+    } else {
+        // ============================================================
+        // STANDALONE PUBLIC FILE DOWNLOAD
+        // ============================================================
+        info!("Resolving file metadata via MEGA API...");
+        let meta = mega.resolve_file(&link).await?;
+
+        let out_path = match args.output {
+            Some(p) => {
+                if p.is_dir() || p.to_string_lossy().ends_with('/') || p.to_string_lossy().ends_with('\\') {
+                    p.join(&meta.name)
+                } else {
+                    p
+                }
+            }
+            None => PathBuf::from(&meta.name),
+        };
+
+        if let Some(parent) = out_path.parent() {
+            if !parent.as_os_str().is_empty() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+        }
+
+        println!("File Name   : {}", meta.name);
+        println!("File Size   : {} bytes ({:.2} MB)", meta.size, meta.size as f64 / (1024.0 * 1024.0));
+        println!("File Handle : {}", meta.handle);
+        println!("Destination : {}", out_path.display());
+        println!("Workers     : {} concurrent slots", args.concurrency);
+        println!("Proxy Route : {}", route_status);
+        println!("============================================================");
+
+        download_file_pipeline(&meta, &out_path, Arc::clone(&http), args.concurrency, &route_status).await?;
+
+        println!("============================================================");
+        println!(" File Download Complete : Verified");
+        println!(" Destination file       : {}", out_path.display());
+        println!("============================================================");
+    }
+
+    Ok(())
+}
+
+async fn download_file_pipeline(
+    meta: &FileMetadata,
+    out_path: &Path,
+    http: Arc<Client>,
+    concurrency: usize,
+    route_display: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // 1. Pre-allocate target sparse file on disk (Zero intermediate temp files)
+    let std_file = std::fs::File::create(out_path)?;
     std_file.set_len(meta.size)?;
     drop(std_file);
 
     let shared_file = Arc::new(Mutex::new(
         tokio::fs::OpenOptions::new()
             .write(true)
-            .open(&out_path)
+            .open(out_path)
             .await?,
     ));
 
-    // 3. Initialize chunk scheduling
+    // 2. Initialize chunk scheduling
     let chunks: Vec<ChunkInfo> = ChunkIterator::new(meta.size).collect();
     let total_chunks = chunks.len();
-    info!("Scheduled {} dynamic variable chunks", total_chunks);
 
-    // 4. Setup indicatif MultiProgress UI
+    // 3. Setup indicatif MultiProgress UI
     let mp = MultiProgress::new();
 
     let pb_main = mp.add(ProgressBar::new(meta.size));
@@ -162,21 +263,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap(),
     );
     pb_status.set_message(format!(
-        "Chunks 0/{} completed | Concurrency: {} | {}",
-        total_chunks, args.concurrency, route_status
+        "Chunks 0/{} | Concurrency: {} | {}",
+        total_chunks, concurrency, route_display
     ));
 
-    // Build HTTP client for workers
-    let mut http_builder = Client::builder()
-        .timeout(CHUNK_TIMEOUT);
-    if let Some(gw) = gateway_url {
-        if let Ok(proxy) = Proxy::all(gw) {
-            http_builder = http_builder.proxy(proxy);
-        }
-    }
-    let http = Arc::new(http_builder.build()?);
-
-    // 5. Worker task queue channels
+    // 4. Worker task queue channels
     let (tx, rx) = mpsc::channel::<ChunkTask>(total_chunks + 32);
     for chunk in chunks {
         tx.send(ChunkTask { info: chunk, attempt: 0 }).await.unwrap();
@@ -186,10 +277,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let completed_chunks = Arc::new(AtomicUsize::new(0));
     let active_workers = Arc::new(AtomicUsize::new(0));
 
-    let mut worker_handles = Vec::with_capacity(args.concurrency);
+    let mut worker_handles = Vec::with_capacity(concurrency);
     let rx = Arc::new(Mutex::new(rx));
 
-    for _worker_id in 0..args.concurrency {
+    for _worker_id in 0..concurrency {
         let rx = Arc::clone(&rx);
         let tx = tx.clone();
         let http = Arc::clone(&http);
@@ -202,7 +293,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let macs = Arc::clone(&chunk_macs);
         let completed = Arc::clone(&completed_chunks);
         let active = Arc::clone(&active_workers);
-        let route_display = route_status.clone();
+        let route_display = route_display.to_string();
 
         worker_handles.push(tokio::spawn(async move {
             loop {
@@ -213,7 +304,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let task = match task {
                     Some(t) => t,
-                    None => break, // Queue drained
+                    None => break,
                 };
 
                 active.fetch_add(1, Ordering::Relaxed);
@@ -221,18 +312,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 let download_fut = async {
                     // INVARIANT 5: Storage Node Fetching
-                    // Primary: path range /{START}-{END}. Fallback: HTTP Range header.
                     let range_path_url = format!("{}/{}", storage_url, chunk.path_range());
 
                     let resp_res = http.get(&range_path_url).send().await;
                     let resp = match resp_res {
                         Ok(r) if r.status().is_success() => r,
                         Ok(r) if r.status() == StatusCode::from_u16(509).unwrap_or(StatusCode::TOO_MANY_REQUESTS) => {
-                            // HTTP 509 Bandwidth Limit Exceeded
                             return Err(MegaError::OverQuota);
                         }
                         _ => {
-                            // Fallback to HTTP Range header
                             let range_val = format!("bytes={}-{}", chunk.offset, chunk.end_offset() - 1);
                             let r2 = http.get(&storage_url)
                                 .header("Range", range_val)
@@ -282,7 +370,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 match res {
                     Ok(Ok(mac)) => {
-                        // Success! Record chunk mac
                         {
                             let mut lock = macs.lock().await;
                             lock[chunk.index] = Some(mac);
@@ -300,8 +387,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     Ok(Err(MegaError::OverQuota)) => {
-                        // HTTP 509 / EOVERQUOTA: Rotate proxy by sleeping briefly and requeueing
-                        debug!("Chunk {} encountered quota limit (509). Backing off and retrying...", chunk.index);
+                        debug!("Chunk {} quota limit (HTTP 509). Backing off and retrying...", chunk.index);
                         tokio::time::sleep(Duration::from_millis(500 * (task.attempt + 1) as u64)).await;
 
                         if task.attempt < MAX_CHUNK_RETRIES {
@@ -322,7 +408,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     Err(_) => {
-                        // Timeout
                         debug!("Chunk {} timed out (> {:?}) on attempt {}", chunk.index, CHUNK_TIMEOUT, task.attempt + 1);
                         if task.attempt < MAX_CHUNK_RETRIES {
                             let _ = tx.send(ChunkTask { info: chunk, attempt: task.attempt + 1 }).await;
@@ -338,29 +423,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }));
     }
 
-    // Await all workers
     for h in worker_handles {
-        match h.await {
-            Ok(Ok(())) => {}
-            Ok(Err(e)) => {
-                pb_main.finish_and_clear();
-                pb_status.finish_and_clear();
-                error!("Download pipeline aborted: {}", e);
-                return Err(e.into());
-            }
-            Err(e) => {
-                pb_main.finish_and_clear();
-                pb_status.finish_and_clear();
-                error!("Worker thread panicked: {}", e);
-                return Err(e.into());
-            }
-        }
+        h.await??;
     }
 
     pb_main.finish_with_message("Transfer completed");
-    pb_status.finish_with_message("Validating CBC-MAC integrity in-flight...");
+    pb_status.finish_with_message("Verifying CBC-MAC checksum...");
 
-    println!("\nValidating cryptographic CBC-MAC checksum...");
+    // Validate CBC-MAC
     let mut accumulator = FileMacAccumulator::new(&meta.key.aes_key);
     let macs = chunk_macs.lock().await;
 
@@ -371,23 +441,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         accumulator.accumulate(&chunk_mac);
     }
 
-    match accumulator.verify(meta.key.expected_mac) {
-        Ok(()) => {
-            println!("============================================================");
-            println!(" Cryptographic CBC-MAC Checksum : VERIFIED [PASS]");
-            println!(" Expected MAC words             : [{:#010x}, {:#010x}]", meta.key.expected_mac[0], meta.key.expected_mac[1]);
-            println!(" Computed condensation MAC      : [{:#010x}, {:#010x}]", accumulator.finish()[0], accumulator.finish()[1]);
-            println!(" File successfully saved to     : {}", out_path.display());
-            println!("============================================================");
-        }
-        Err(e) => {
-            println!("============================================================");
-            println!(" Cryptographic CBC-MAC Checksum : FAILED [CORRUPTION DETECTED]");
-            println!(" Error Details                  : {}", e);
-            println!("============================================================");
-            return Err(e.into());
-        }
-    }
-
+    accumulator.verify(meta.key.expected_mac)?;
     Ok(())
 }

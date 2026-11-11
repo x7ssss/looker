@@ -60,6 +60,20 @@ impl CheckedProxy {
     }
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ProxySnapshot {
+    pub addr: SocketAddr,
+    pub proto: ProxyProto,
+    pub latency_ms: u64,
+    pub healthy: bool,
+    pub consecutive_failures: u32,
+    pub total_requests: u64,
+    pub successful_requests: u64,
+    pub anonymity: AnonymityLevel,
+    pub exit_ip: Option<IpAddr>,
+    pub geo: Option<GeoInfo>,
+}
+
 #[derive(Debug)]
 pub struct ProxyItem {
     pub addr: SocketAddr,
@@ -171,5 +185,20 @@ impl ProxyItem {
         }
         let success = self.successful_requests.load(Ordering::Relaxed);
         (success as f64) / (total as f64)
+    }
+
+    pub fn snapshot(&self) -> ProxySnapshot {
+        ProxySnapshot {
+            addr: self.addr,
+            proto: self.proto,
+            latency_ms: self.latency_ms.load(Ordering::Relaxed),
+            healthy: self.is_healthy(),
+            consecutive_failures: self.consecutive_failures.load(Ordering::Relaxed),
+            total_requests: self.total_requests.load(Ordering::Relaxed),
+            successful_requests: self.successful_requests.load(Ordering::Relaxed),
+            anonymity: self.anonymity,
+            exit_ip: self.exit_ip,
+            geo: self.geo.clone(),
+        }
     }
 }

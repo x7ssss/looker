@@ -217,4 +217,34 @@ async fn test_gateway_live_and_status_endpoints() {
     assert!(resp_str2.contains("Content-Type: application/json"));
     assert!(resp_str2.contains("\"total_proxies\": 1"));
     assert!(resp_str2.contains("\"healthy_proxies\": 1"));
+
+    // 3. Test GET /ui (Embedded Dashboard)
+    let mut client3 = TcpStream::connect(gateway_addr).await.unwrap();
+    client3
+        .write_all(b"GET /ui HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut resp_buf3 = vec![0u8; 2048];
+    let n3 = client3.read(&mut resp_buf3).await.unwrap();
+    let resp_str3 = String::from_utf8_lossy(&resp_buf3[..n3]);
+
+    assert!(resp_str3.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str3.contains("Content-Type: text/html"));
+    assert!(resp_str3.contains("LOOKER"));
+
+    // 4. Test GET /api/proxies
+    let mut client4 = TcpStream::connect(gateway_addr).await.unwrap();
+    client4
+        .write_all(b"GET /api/proxies HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+
+    let mut resp_buf4 = vec![0u8; 2048];
+    let n4 = client4.read(&mut resp_buf4).await.unwrap();
+    let resp_str4 = String::from_utf8_lossy(&resp_buf4[..n4]);
+
+    assert!(resp_str4.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str4.contains("Content-Type: application/json"));
+    assert!(resp_str4.contains("192.0.2.1:1080"));
 }
