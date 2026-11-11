@@ -1,0 +1,19 @@
+[package]
+name = "looker-mega"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "MEGA.nz API client, key derivation, AES-128-CTR decryption, and CBC-MAC integrity verification"
+
+[dependencies]
+tokio = { workspace = true, features = ["io-util", "sync", "time"] }
+aes = { workspace = true }
+ctr = { workspace = true }
+cipher = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }

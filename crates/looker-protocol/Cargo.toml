@@ -1,0 +1,17 @@
+[package]
+name = "looker-protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Raw byte-level SOCKS4/5 & HTTP CONNECT handshakes on TcpStream"
+
+[dependencies]
+tokio = { workspace = true, features = ["net", "io-util"] }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[features]
+default = ["serde"]
+serde = ["dep:serde"]

@@ -1,0 +1,51 @@
+[workspace]
+members = [
+    "crates/looker-protocol",
+    "crates/looker-geo",
+    "crates/looker-scraper",
+    "crates/looker-pool",
+    "crates/looker-gateway",
+    "crates/looker-mega",
+    "crates/looker-proxy",
+    "crates/looker-down",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+authors = ["Looker Team <team@looker.rs>"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/looker-rs/looker"
+
+[workspace.dependencies]
+tokio = { version = "1.40", features = ["full"] }
+bytes = "1.7"
+thiserror = "2.0"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+regex = "1.10"
+ipnet = "2.9"
+maxminddb = { version = "0.32", features = ["mmap"] }
+memmap2 = "0.9"
+aes = "0.8"
+ctr = "0.9"
+cipher = "0.4"
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+indicatif = "0.17"
+socket2 = { version = "0.5", features = ["all"] }
+parking_lot = "0.12"
+rand = "0.8"
+
+looker-protocol = { path = "crates/looker-protocol" }
+looker-geo = { path = "crates/looker-geo" }
+looker-scraper = { path = "crates/looker-scraper" }
+looker-pool = { path = "crates/looker-pool" }
+looker-gateway = { path = "crates/looker-gateway" }
+looker-mega = { path = "crates/looker-mega" }

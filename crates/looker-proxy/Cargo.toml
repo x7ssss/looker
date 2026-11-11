@@ -1,0 +1,23 @@
+[package]
+name = "looker-proxy"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Daemon & CLI binary: scraper + pool + gateway + file exporter"
+
+[[bin]]
+name = "looker-proxy"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+looker-protocol = { workspace = true }
+looker-geo = { workspace = true }
+looker-scraper = { workspace = true }
+looker-pool = { workspace = true }
+looker-gateway = { workspace = true }

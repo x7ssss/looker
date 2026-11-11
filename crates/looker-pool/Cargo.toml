@@ -1,0 +1,17 @@
+[package]
+name = "looker-pool"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Thread-safe proxy registry, atomic circuit breakers, and latency ranking"
+
+[dependencies]
+tokio = { workspace = true, features = ["sync", "time"] }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+rand = { workspace = true }
+looker-protocol = { workspace = true }
+looker-geo = { workspace = true }

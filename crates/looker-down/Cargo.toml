@@ -1,0 +1,21 @@
+[package]
+name = "looker-down"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Native wire-speed downloader binary: parallel chunking through local gateway"
+
+[[bin]]
+name = "looker-down"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+indicatif = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+looker-mega = { workspace = true }

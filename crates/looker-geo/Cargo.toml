@@ -1,0 +1,17 @@
+[package]
+name = "looker-geo"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Zero-copy offline MaxMind GeoLite2 reader via memmap2"
+
+[dependencies]
+maxminddb = { workspace = true, features = ["mmap"] }
+memmap2 = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, optional = true }
+
+[features]
+default = ["serde"]
+serde = ["dep:serde"]
