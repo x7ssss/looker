@@ -9,7 +9,7 @@ pub mod mac;
 pub use api::{FileMetadata, MegaClient, MegaFileInfo};
 pub use chunk::{ChunkInfo, ChunkIterator};
 pub use crypto::{decrypt_attributes, decrypt_ctr, MegaFileAttributes, MegaKey};
-pub use error::MegaError;
+pub use error::{format_error_chain, format_reqwest_error, MegaError};
 pub use folder::{
     parse_folder_share_key, parse_folder_tree, unwrap_node_key, FolderNodeType, MegaFolderNode,
     MegaFolderTree, RawFolderNode,

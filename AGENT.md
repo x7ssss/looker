@@ -278,6 +278,16 @@
 - [x] `looker-app`: Configured programmatic `WebviewWindowBuilder` with `.on_new_window(|url, _features| { let _ = opener::open(url.as_str()); NewWindowResponse::Deny })` so `target="_blank"` links (`all.txt`, `socks5.txt`, etc.) open in the user's default browser instead of broken Webview2 popup windows.
 - [x] `looker-down`: Integrated `link.is_folder_scope()` to automatically handle subfolders and folder file deep-links through the scoped tree batch download pipeline.
 
+### Phase 11: MEGA Client HTTPS/TLS Hardening, Direct Metadata Routing, and Full Error Chain Reporting
+- [x] `looker-mega/Cargo.toml`: Explicitly configured `reqwest` with `features = ["json", "rustls-tls", "socks", "stream"]` and updated workspace dependencies to eliminate TLS root issues.
+- [x] `looker-mega/error.rs`: Upgraded `MegaError::Http` formatting with `format_error_chain(&dyn Error)` walking the complete `std::error::Error::source()` hierarchy and joining causes with `: `, ensuring root cause errors (such as TCP connection resets or certificate rejections) are never swallowed into a bare `"error sending request for url"`.
+- [x] `looker-mega/api.rs`: Dual-client architecture in `MegaClient`:
+  - **Direct HTTPS Client (`direct_http`)**: Dedicated direct connection with `rustls-tls`, 10s connect timeout, 20s total timeout, and explicit User-Agent for all metadata and control server API calls (`resolve_file`, `fetch_folder_tree`, `get_folder_file_url` to `https://g.api.mega.co.nz/cs`). Metadata queries bypass the public proxy gateway to eliminate inspection drops.
+  - **Gateway Client (`gateway_http`)**: Optional proxy-routed client (`http://127.0.0.1:8080`) used by `chunk_client()` for high-throughput quota-bypassing payload transfers from `gfs*.userstorage.mega.co.nz`.
+  - **Automated Retry & Fallback (`post_api`)**: Transient retry logic (up to 2 retries with 500ms backoff) on `g.api.mega.co.nz/cs` with automatic fallback to gateway proxy if direct access is blocked (e.g. ISP censorship).
+- [x] `looker-gateway`: Wired direct metadata resolution in `POST /api/mega/inspect` and `POST /api/mega/download` via `MegaClient::new(Some(&gateway_url))`.
+- [x] Integration tests: Added `test_mega_error_chain_formatting` and `test_mega_client_direct_and_gateway_routing` in `crates/looker-mega/tests/crypto_tests.rs`.
+
 ---
 
 ## 5. Session Instructions for Future Agents

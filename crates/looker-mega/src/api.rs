@@ -76,7 +76,8 @@ enum FolderTreeApiResponse {
 }
 
 pub struct MegaClient {
-    http: Client,
+    direct_http: Client,
+    gateway_http: Option<Client>,
     api_url: &'static str,
 }
 
@@ -87,22 +88,112 @@ impl Default for MegaClient {
 }
 
 impl MegaClient {
+    /// Creates a new MegaClient.
+    ///
+    /// - `proxy_url`: Optional rotating gateway URL (e.g. `http://127.0.0.1:8080`).
+    ///
+    /// In accordance with clean-room protocol findings, all metadata and command server API calls
+    /// (`https://g.api.mega.co.nz/cs`) are routed DIRECTLY with explicit timeouts and rustls TLS
+    /// to eliminate proxy drops during inspection and directory traversal.
+    /// If direct access is blocked (e.g. ISP censorship), requests automatically fall back to the gateway proxy.
+    /// Quota-bypassing chunk data transfers use `chunk_client()`.
     pub fn new(proxy_url: Option<&str>) -> Self {
-        let mut builder = Client::builder()
+        let direct_http = Client::builder()
+            .use_rustls_tls()
+            .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(20))
-            .user_agent("Looker/0.1");
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Looker/0.1.0")
+            .build()
+            .expect("Failed to build direct HTTPS client");
 
-        if let Some(proxy) = proxy_url {
+        let gateway_http = proxy_url.and_then(|proxy| {
             if let Ok(p) = Proxy::all(proxy) {
-                builder = builder.proxy(p);
+                Client::builder()
+                    .use_rustls_tls()
+                    .connect_timeout(Duration::from_secs(10))
+                    .timeout(Duration::from_secs(25))
+                    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Looker/0.1.0")
+                    .proxy(p)
+                    .build()
+                    .ok()
+            } else {
+                None
+            }
+        });
+
+        Self {
+            direct_http,
+            gateway_http,
+            api_url: "https://g.api.mega.co.nz/cs",
+        }
+    }
+
+    /// Creates a direct-only MegaClient without proxy fallback.
+    pub fn new_direct() -> Self {
+        Self::new(None)
+    }
+
+    /// Returns a reference to the direct HTTPS client.
+    pub fn direct_client(&self) -> &Client {
+        &self.direct_http
+    }
+
+    /// Returns the gateway-routed client if configured, or falls back to direct client.
+    /// Used for high-throughput chunk data transfers where proxy rotation bypasses quotas.
+    pub fn chunk_client(&self) -> &Client {
+        self.gateway_http.as_ref().unwrap_or(&self.direct_http)
+    }
+
+    /// Sends a JSON POST request to the MEGA API with automated transient retry
+    /// (up to 2 retries with 500ms backoff) and fallback to gateway proxy if direct is blocked.
+    async fn post_api<T: Serialize + ?Sized, R: serde::de::DeserializeOwned>(
+        &self,
+        url: &str,
+        payload: &T,
+    ) -> Result<R, MegaError> {
+        let mut last_error: Option<MegaError> = None;
+
+        // 1. Direct requests with transient retry (up to 2 retries = 3 attempts total)
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                tracing::debug!("Retrying direct MEGA API request (attempt {})...", attempt + 1);
+            }
+
+            match self.direct_http.post(url).json(payload).send().await {
+                Ok(resp) => {
+                    match resp.json::<R>().await {
+                        Ok(data) => return Ok(data),
+                        Err(e) => {
+                            last_error = Some(MegaError::from(e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    last_error = Some(MegaError::from(e));
+                }
             }
         }
 
-        let http = builder.build().expect("Failed to build HTTP client");
-        Self {
-            http,
-            api_url: "https://g.api.mega.co.nz/cs",
+        // 2. Fallback to gateway proxy if direct fails (e.g. ISP block of mega.co.nz)
+        if let Some(gw_client) = &self.gateway_http {
+            tracing::warn!("Direct MEGA API requests failed, falling back to gateway proxy...");
+            match gw_client.post(url).json(payload).send().await {
+                Ok(resp) => {
+                    match resp.json::<R>().await {
+                        Ok(data) => return Ok(data),
+                        Err(e) => {
+                            last_error = Some(MegaError::from(e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    last_error = Some(MegaError::from(e));
+                }
+            }
         }
+
+        Err(last_error.unwrap_or_else(|| MegaError::ApiError(-1)))
     }
 
     /// Resolves file metadata and storage node URL from a public MEGA link.
@@ -123,8 +214,7 @@ impl MegaClient {
             p: &link.handle,
         }];
 
-        let resp = self.http.post(&url).json(&payload).send().await?;
-        let api_resp: ApiResponse = resp.json().await?;
+        let api_resp: ApiResponse = self.post_api(&url, &payload).await?;
 
         match api_resp {
             ApiResponse::Success(mut list) => {
@@ -171,8 +261,7 @@ impl MegaClient {
             ca: 1,
         }];
 
-        let resp = self.http.post(&url).json(&payload).send().await?;
-        let api_resp: FolderTreeApiResponse = resp.json().await?;
+        let api_resp: FolderTreeApiResponse = self.post_api(&url, &payload).await?;
 
         match api_resp {
             FolderTreeApiResponse::Success(mut list) => {
@@ -221,8 +310,7 @@ impl MegaClient {
             n: file_node_handle,
         }];
 
-        let resp = self.http.post(&url).json(&payload).send().await?;
-        let api_resp: ApiResponse = resp.json().await?;
+        let api_resp: ApiResponse = self.post_api(&url, &payload).await?;
 
         match api_resp {
             ApiResponse::Success(mut list) => {

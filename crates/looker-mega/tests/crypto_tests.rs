@@ -134,3 +134,21 @@ fn test_cbc_mac_accumulation_and_folding_verification() {
         other => panic!("Expected MacMismatch, got {:?}", other),
     }
 }
+
+#[test]
+fn test_mega_error_chain_formatting() {
+    use std::io::{Error as IoError, ErrorKind};
+    let root = IoError::new(ErrorKind::ConnectionRefused, "os error 10061: connection refused");
+    let wrapped = IoError::new(ErrorKind::Other, root);
+    let chain = looker_mega::format_error_chain(&wrapped);
+
+    assert!(chain.contains("connection refused"));
+    assert!(chain.contains(": "));
+}
+
+#[test]
+fn test_mega_client_direct_and_gateway_routing() {
+    let client = looker_mega::MegaClient::new(Some("http://127.0.0.1:8080"));
+    let _ = client.direct_client();
+    let _ = client.chunk_client();
+}

@@ -1,4 +1,21 @@
+use std::error::Error;
 use thiserror::Error;
+
+/// Walks the entire chain of error sources and joins them with `: `.
+pub fn format_error_chain(err: &(dyn Error + 'static)) -> String {
+    let mut msg = err.to_string();
+    let mut curr = err.source();
+    while let Some(src) = curr {
+        msg.push_str(": ");
+        msg.push_str(&src.to_string());
+        curr = src.source();
+    }
+    msg
+}
+
+pub fn format_reqwest_error(err: &reqwest::Error) -> String {
+    format_error_chain(err)
+}
 
 #[derive(Error, Debug)]
 pub enum MegaError {
@@ -17,7 +34,7 @@ pub enum MegaError {
     #[error("Attribute JSON deserialization failed: {0}")]
     AttributeJson(#[from] serde_json::Error),
 
-    #[error("HTTP request to MEGA failed: {0}")]
+    #[error("HTTP request to MEGA failed: {}", format_reqwest_error(.0))]
     Http(#[from] reqwest::Error),
 
     #[error("MEGA bandwidth transfer quota exceeded (EOVERQUOTA -17 / HTTP 509)")]
