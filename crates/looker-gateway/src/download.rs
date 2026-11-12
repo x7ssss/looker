@@ -99,16 +99,33 @@ impl DownloadManager {
         let link = MegaLink::parse(url).map_err(|e| format!("Invalid MEGA URL: {}", e))?;
         let mega = MegaClient::new(Some(&format!("http://{}", self.gateway_addr)));
 
-        if link.is_folder() {
+        if link.is_folder_scope() {
             let tree = mega
                 .fetch_folder_tree(&link)
                 .await
                 .map_err(|e| format!("Failed to fetch folder tree: {}", e))?;
 
+            // If it scoped to a single file node (e.g. /file/{id}):
+            if tree.files().len() == 1 && tree.directories().is_empty() {
+                let f = tree.files()[0];
+                return Ok(InspectResponse {
+                    target_type: "file".to_string(),
+                    title: f.name.clone(),
+                    total_size: f.size,
+                    nodes: vec![InspectNode {
+                        handle: f.handle.clone(),
+                        name: f.name.clone(),
+                        size: f.size,
+                        is_dir: false,
+                        path: format!("/{}", f.name),
+                    }],
+                });
+            }
+
             let title = tree
                 .directories()
                 .iter()
-                .find(|d| d.parent_handle.is_empty() || d.parent_handle == link.handle)
+                .find(|d| d.parent_handle.is_empty() || d.parent_handle == link.handle || d.handle == link.handle)
                 .map(|d| d.name.clone())
                 .unwrap_or_else(|| format!("Folder_{}", link.handle));
 
@@ -163,10 +180,21 @@ impl DownloadManager {
     }
 
     /// Spawns an asynchronous download task in the background.
-    pub async fn start_download(&self, req: DownloadRequest) -> Result<String, String> {
+    pub async fn start_download(&self, mut req: DownloadRequest) -> Result<String, String> {
         let link = MegaLink::parse(&req.url).map_err(|e| format!("Invalid MEGA URL: {}", e))?;
         let task_id = format!("task-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let cancel_token = CancellationToken::new();
+
+        if req.output_dir.trim().is_empty() {
+            req.output_dir = crate::resolve_default_download_dir()
+                .to_string_lossy()
+                .to_string();
+        }
+
+        let out_path = std::path::Path::new(&req.output_dir);
+        tokio::fs::create_dir_all(out_path)
+            .await
+            .map_err(|e| format!("Failed to create output directory {}: {}", out_path.display(), e))?;
 
         let initial_title = if link.is_folder() {
             format!("MEGA Folder ({})", link.handle)
@@ -307,7 +335,7 @@ async fn run_download_task(
 
     let http = Arc::new(build_http_client(&gateway_addr).await);
 
-    if link.is_folder() {
+    if link.is_folder_scope() {
         let tree = mega
             .fetch_folder_tree(&link)
             .await
@@ -316,11 +344,15 @@ async fn run_download_task(
         let folder_title = tree
             .directories()
             .iter()
-            .find(|d| d.parent_handle.is_empty() || d.parent_handle == link.handle)
+            .find(|d| d.parent_handle.is_empty() || d.parent_handle == link.handle || d.handle == link.handle)
             .map(|d| d.name.clone())
             .unwrap_or_else(|| format!("Folder_{}", link.handle));
 
-        let folder_dest = base_out.join(&folder_title);
+        let folder_dest = if tree.directories().is_empty() {
+            base_out.clone()
+        } else {
+            base_out.join(&folder_title)
+        };
         tokio::fs::create_dir_all(&folder_dest)
             .await
             .map_err(|e| format!("Failed to create folder {}: {}", folder_dest.display(), e))?;

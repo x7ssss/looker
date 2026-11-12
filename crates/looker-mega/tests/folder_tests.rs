@@ -220,3 +220,93 @@ fn test_folder_tree_relative_path_resolution() {
     assert_eq!(tree.directories().len(), 1);
     assert_eq!(tree.total_bytes(), 3072);
 }
+
+#[test]
+fn test_subfolder_deep_link_parsing() {
+    let url = "https://mega.nz/folder/HqJUnY4J#lBStkttzdoYm7HA0M13nmg/folder/fzxBDZKC";
+    let link = MegaLink::parse(url).expect("Should parse subfolder deep-link");
+    assert_eq!(link.handle, "HqJUnY4J");
+    assert_eq!(link.key, "lBStkttzdoYm7HA0M13nmg");
+    assert_eq!(link.sub_folder_id.as_deref(), Some("fzxBDZKC"));
+    assert_eq!(link.target_file_id, None);
+    assert!(link.is_folder());
+    assert!(link.is_folder_scope());
+}
+
+#[test]
+fn test_folder_tree_subfolder_and_file_scoping() {
+    let share_key = [0x55u8; 16];
+    let cipher = Aes128::new(GenericArray::from_slice(&share_key));
+
+    let encrypt_16 = |key: [u8; 16]| -> String {
+        let mut b = GenericArray::clone_from_slice(&key);
+        cipher.encrypt_block(&mut b);
+        BASE64_URL_SAFE_NO_PAD.encode(b.as_slice())
+    };
+
+    let encrypt_32 = |key: [u8; 32]| -> String {
+        let mut b1 = GenericArray::clone_from_slice(&key[0..16]);
+        let mut b2 = GenericArray::clone_from_slice(&key[16..32]);
+        cipher.encrypt_block(&mut b1);
+        cipher.encrypt_block(&mut b2);
+        let mut enc = Vec::new();
+        enc.extend_from_slice(b1.as_slice());
+        enc.extend_from_slice(b2.as_slice());
+        BASE64_URL_SAFE_NO_PAD.encode(&enc)
+    };
+
+    let dir_attr_key = [0x11u8; 16];
+    let file1_key = [0x22u8; 32];
+    let file2_key = [0x33u8; 32];
+
+    let dir_enc_attr = mock_encrypt_attributes(&dir_attr_key, "Documents");
+    let mut f1_folded = [0u8; 16];
+    for i in 0..16 {
+        f1_folded[i] = file1_key[i] ^ file1_key[i + 16];
+    }
+    let f1_enc_attr = mock_encrypt_attributes(&f1_folded, "doc.txt");
+
+    let mut f2_folded = [0u8; 16];
+    for i in 0..16 {
+        f2_folded[i] = file2_key[i] ^ file2_key[i + 16];
+    }
+    let f2_enc_attr = mock_encrypt_attributes(&f2_folded, "root.png");
+
+    let raw_nodes = vec![
+        RawFolderNode {
+            h: "sub_h".to_string(),
+            p: "root_h".to_string(),
+            t: 1,
+            a: dir_enc_attr,
+            k: format!("sub_h:{}", encrypt_16(dir_attr_key)),
+            s: None,
+        },
+        RawFolderNode {
+            h: "f1".to_string(),
+            p: "sub_h".to_string(),
+            t: 0,
+            a: f1_enc_attr,
+            k: format!("f1:{}", encrypt_32(file1_key)),
+            s: Some(1024),
+        },
+        RawFolderNode {
+            h: "f2".to_string(),
+            p: "root_h".to_string(),
+            t: 0,
+            a: f2_enc_attr,
+            k: format!("f2:{}", encrypt_32(file2_key)),
+            s: Some(2048),
+        },
+    ];
+
+    // Test subfolder scoping
+    let mut tree_scoped = parse_folder_tree("root_h", &share_key, raw_nodes)
+        .expect("Should parse folder tree");
+    tree_scoped.apply_scope(Some("sub_h"), None);
+
+    assert_eq!(tree_scoped.folder_handle, "sub_h");
+    assert_eq!(tree_scoped.files().len(), 1);
+    let scoped_doc = tree_scoped.find_node("f1").expect("Should find doc.txt in subfolder");
+    assert_eq!(scoped_doc.relative_path.to_str().unwrap().replace('\\', "/"), "doc.txt");
+    assert!(tree_scoped.find_node("f2").is_none()); // root.png excluded
+}

@@ -256,6 +256,28 @@
   - Updated Windows release matrix to install Tauri CLI and build the NSIS installer via `cargo tauri build --target x86_64-pc-windows-msvc --bundles nsis`.
   - Packages standalone NSIS installer as `Looker-Setup-x64.exe` (and `Looker_x64-setup.exe`) in `dist/` alongside portable zip archives and SHA-256 checksums.
 
+### Phase 10: MEGA Subfolder Deep-Link Parsing, Download Category & Folder Picker, and Tauri External Window Routing
+- [x] `looker-mega`: Extended `MegaLink` parser to support subfolder and file deep-links:
+  - `/folder/{root_id}#{key}/folder/{sub_folder_id}` -> `sub_folder_id: Some(sub_id)`.
+  - `/folder/{root_id}#{key}/file/{target_file_id}` -> `target_file_id: Some(file_id)`.
+  - Extracts 22-character Base64 share key cleanly without errors.
+- [x] `looker-mega`: Implemented `MegaFolderTree::apply_scope`:
+  - When `sub_folder_id` is present: scopes returned nodes to `target_h` and all recursive descendants whose parent chain reaches `target_h`. Recomputes relative paths so `target_h` acts as the download root.
+  - When `target_file_id` is present: scopes to that single file node.
+  - Integration tests in `crates/looker-mega/tests/folder_tests.rs`: verified `test_subfolder_deep_link_parsing` and `test_folder_tree_subfolder_and_file_scoping`.
+- [x] `looker-gateway`: Safe default download directory resolution via `resolve_default_download_dir()` using `dirs::download_dir().join("Looker")`, falling back to `./downloads`.
+- [x] `looker-gateway`: System REST API endpoints:
+  - `GET /api/system/default-dir`: Returns JSON `{ "base_dir": "..." }`.
+  - `POST /api/system/pick-folder`: Native folder selection dialog via `rfd::AsyncFileDialog::new().pick_folder().await`, returning `{ "path": "<selected_path>" }`.
+  - `GET /favicon.ico`: Returns `204 No Content` to eliminate 405 console errors.
+  - `POST /api/mega/download`: Recursively ensures output directory exists before worker allocation.
+- [x] `looker-gateway/ui`: Upgraded MEGA Downloader UI:
+  - Added `<link rel="icon" href="data:," />` in `<head>`.
+  - Download category pills: `General` (`<base_dir>`), `Media & Video` (`<base_dir>/Media`), `Software & ISOs` (`<base_dir>/Software`), `Games` (`<base_dir>/Games`), `Archives` (`<base_dir>/Archives`).
+  - Destination path input with real OS path + `Browse...` button connecting to `POST /api/system/pick-folder`.
+- [x] `looker-app`: Configured programmatic `WebviewWindowBuilder` with `.on_new_window(|url, _features| { let _ = opener::open(url.as_str()); NewWindowResponse::Deny })` so `target="_blank"` links (`all.txt`, `socks5.txt`, etc.) open in the user's default browser instead of broken Webview2 popup windows.
+- [x] `looker-down`: Integrated `link.is_folder_scope()` to automatically handle subfolders and folder file deep-links through the scoped tree batch download pipeline.
+
 ---
 
 ## 5. Session Instructions for Future Agents

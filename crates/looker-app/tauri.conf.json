@@ -8,22 +8,7 @@
   },
   "app": {
     "withGlobalTauri": false,
-    "windows": [
-      {
-        "label": "main",
-        "title": "LOOKER // Network Control & Proxy Gateway",
-        "url": "http://127.0.0.1:8080/ui",
-        "width": 1280,
-        "height": 800,
-        "minWidth": 900,
-        "minHeight": 600,
-        "center": true,
-        "resizable": true,
-        "fullscreen": false,
-        "theme": "Dark",
-        "backgroundColor": "#09090b"
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }

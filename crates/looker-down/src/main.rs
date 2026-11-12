@@ -125,7 +125,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let http = Arc::new(http_builder.build()?);
 
-    if link.is_folder() {
+    if link.is_folder_scope() {
         // ============================================================
         // PUBLIC FOLDER BATCH DOWNLOAD
         // ============================================================

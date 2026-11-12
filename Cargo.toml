@@ -47,6 +47,8 @@ rust-embed = { version = "8.14", features = ["mime-guess"] }
 mimalloc = { version = "0.1", default-features = false }
 opener = "0.7"
 tokio-util = { version = "0.7", features = ["rt"] }
+dirs = "6"
+rfd = { version = "0.15", default-features = false, features = ["tokio"] }
 
 looker-protocol = { path = "crates/looker-protocol" }
 looker-geo = { path = "crates/looker-geo" }

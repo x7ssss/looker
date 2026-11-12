@@ -6,55 +6,63 @@ pub struct MegaLink {
     pub key: String,
     pub is_folder: bool,
     pub subfile_handle: Option<String>,
+    pub sub_folder_id: Option<String>,
+    pub target_file_id: Option<String>,
 }
 
 impl MegaLink {
     /// Parses public MEGA link formats:
     /// - Modern File: `https://mega.nz/file/{handle}#{key}`
     /// - Legacy File: `https://mega.nz/#!{handle}!{key}`
-    /// - Modern Folder: `https://mega.nz/folder/{id}#{key}`
+    /// - Modern Folder: `https://mega.nz/folder/{root_id}#{key}`
+    /// - Modern Subfolder Deep-Link: `https://mega.nz/folder/{root_id}#{key}/folder/{sub_folder_id}`
+    /// - Modern Folder File Deep-Link: `https://mega.nz/folder/{root_id}#{key}/file/{target_file_id}`
     /// - Legacy Folder: `https://mega.nz/#F!{id}!{key}`
-    /// - Folder Sub-File: `https://mega.nz/folder/{id}#{key}/file/{file_handle}`
     pub fn parse(url: &str) -> Result<Self, MegaError> {
         let clean = url.trim();
 
-        // 1. Modern Folder Sub-File: /folder/{id}#{key}/file/{file_handle}
+        // 1. Modern Folder & Deep-Links: /folder/{root_id}#{fragment}
         if let Some(pos) = clean.find("/folder/") {
             let after = &clean[pos + 8..];
-            if let Some(sub_pos) = after.find("/file/") {
-                let folder_part = &after[..sub_pos];
-                let subfile_handle = after[sub_pos + 6..].trim().to_string();
+            let mut parts = after.splitn(2, '#');
+            let handle = parts.next().unwrap_or("").trim();
+            let fragment = parts.next().unwrap_or("").trim();
 
-                let mut parts = folder_part.splitn(2, '#');
-                let handle = parts.next().unwrap_or("").trim();
-                let key = parts.next().unwrap_or("").trim();
+            if !handle.is_empty() && !fragment.is_empty() {
+                let clean_frag = fragment.split('?').next().unwrap_or(fragment).trim();
+                let segs: Vec<&str> = clean_frag.split('/').filter(|s| !s.is_empty()).collect();
 
-                if !handle.is_empty() && !key.is_empty() {
+                if !segs.is_empty() {
+                    let key = segs[0].trim().to_string();
+                    let mut sub_folder_id = None;
+                    let mut target_file_id = None;
+                    let mut is_folder = true;
+
+                    if segs.len() >= 3 {
+                        if segs[1].eq_ignore_ascii_case("folder") {
+                            sub_folder_id = Some(segs[2].trim().to_string());
+                            is_folder = true;
+                        } else if segs[1].eq_ignore_ascii_case("file") {
+                            target_file_id = Some(segs[2].trim().to_string());
+                            is_folder = false;
+                        }
+                    }
+
+                    let subfile_handle = target_file_id.clone();
+
                     return Ok(Self {
                         handle: handle.to_string(),
-                        key: key.to_string(),
-                        is_folder: false, // downloading the specific subfile
-                        subfile_handle: Some(subfile_handle),
+                        key,
+                        is_folder,
+                        subfile_handle,
+                        sub_folder_id,
+                        target_file_id,
                     });
                 }
             }
-
-            // Modern Folder: /folder/{id}#{key}
-            let mut parts = after.splitn(2, '#');
-            let handle = parts.next().unwrap_or("").trim();
-            let key = parts.next().unwrap_or("").trim();
-
-            if !handle.is_empty() && !key.is_empty() {
-                return Ok(Self {
-                    handle: handle.to_string(),
-                    key: key.to_string(),
-                    is_folder: true,
-                    subfile_handle: None,
-                });
-            }
         }
 
-        // 2. Legacy Folder: /#F!{id}!{key}
+        // 2. Legacy Folder: /#F!{id}!{key} (optional !{subfile_id})
         if let Some(pos) = clean.find("/#F!") {
             let after = &clean[pos + 4..];
             let parts: Vec<&str> = after.split('!').collect();
@@ -68,12 +76,15 @@ impl MegaLink {
                 };
 
                 let is_folder = subfile_handle.is_none();
+                let target_file_id = subfile_handle.clone();
                 if !handle.is_empty() && !key.is_empty() {
                     return Ok(Self {
                         handle,
                         key,
                         is_folder,
                         subfile_handle,
+                        sub_folder_id: None,
+                        target_file_id,
                     });
                 }
             }
@@ -92,6 +103,8 @@ impl MegaLink {
                     key: key.to_string(),
                     is_folder: false,
                     subfile_handle: None,
+                    sub_folder_id: None,
+                    target_file_id: None,
                 });
             }
         }
@@ -109,6 +122,8 @@ impl MegaLink {
                     key: key.to_string(),
                     is_folder: false,
                     subfile_handle: None,
+                    sub_folder_id: None,
+                    target_file_id: None,
                 });
             }
         }
@@ -118,6 +133,10 @@ impl MegaLink {
 
     pub fn is_folder(&self) -> bool {
         self.is_folder
+    }
+
+    pub fn is_folder_scope(&self) -> bool {
+        self.is_folder || self.sub_folder_id.is_some() || self.target_file_id.is_some() || self.subfile_handle.is_some()
     }
 }
 

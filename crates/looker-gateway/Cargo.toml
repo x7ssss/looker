@@ -20,6 +20,8 @@ looker-protocol = { workspace = true }
 looker-pool = { workspace = true }
 looker-mega = { workspace = true }
 reqwest = { workspace = true }
+dirs = { workspace = true }
+rfd = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

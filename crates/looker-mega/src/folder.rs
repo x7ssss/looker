@@ -55,6 +55,93 @@ impl MegaFolderTree {
     pub fn total_bytes(&self) -> u64 {
         self.files().iter().map(|f| f.size).sum()
     }
+
+    /// Filters tree nodes based on deep-link subfolder or target file scope.
+    ///
+    /// - If `target_file_id` is specified: scopes the tree to only that single file node.
+    /// - If `sub_folder_id` is specified: scopes the tree to `target_h` and all recursive children
+    ///   whose ancestor chain passes through `target_h`. Recomputes relative paths so `target_h`
+    ///   acts as the download root.
+    pub fn apply_scope(&mut self, sub_folder_id: Option<&str>, target_file_id: Option<&str>) {
+        if let Some(target_file) = target_file_id {
+            if let Some(mut file_node) = self.nodes.iter().find(|n| n.handle == target_file).cloned() {
+                file_node.relative_path = PathBuf::from(&file_node.name);
+                self.nodes = vec![file_node];
+            } else {
+                self.nodes.clear();
+            }
+            return;
+        }
+
+        if let Some(target_sub) = sub_folder_id {
+            let target_exists = self.nodes.iter().any(|n| n.handle == target_sub);
+            if !target_exists {
+                self.nodes.clear();
+                return;
+            }
+
+            // Build parent map: handle -> parent_handle
+            let parent_map: HashMap<String, String> = self
+                .nodes
+                .iter()
+                .map(|n| (n.handle.clone(), n.parent_handle.clone()))
+                .collect();
+
+            let is_descendant = |handle: &str| -> bool {
+                if handle == target_sub {
+                    return true;
+                }
+                let mut curr = parent_map.get(handle).cloned();
+                while let Some(p) = curr {
+                    if p == target_sub {
+                        return true;
+                    }
+                    if p.is_empty() || p == self.folder_handle {
+                        break;
+                    }
+                    curr = parent_map.get(&p).cloned();
+                }
+                false
+            };
+
+            // Build name map: handle -> name
+            let name_map: HashMap<String, String> = self
+                .nodes
+                .iter()
+                .map(|n| (n.handle.clone(), n.name.clone()))
+                .collect();
+
+            let mut filtered = Vec::new();
+            for mut node in self.nodes.drain(..) {
+                if is_descendant(&node.handle) {
+                    if node.handle == target_sub {
+                        node.relative_path = PathBuf::new();
+                    } else {
+                        // Recompute relative path from target_sub downwards
+                        let mut comps = vec![node.name.clone()];
+                        let mut curr_p = node.parent_handle.clone();
+                        while !curr_p.is_empty() && curr_p != target_sub {
+                            if let Some(pname) = name_map.get(&curr_p) {
+                                comps.push(pname.clone());
+                                curr_p = parent_map.get(&curr_p).cloned().unwrap_or_default();
+                            } else {
+                                break;
+                            }
+                        }
+                        comps.reverse();
+                        let mut pbuf = PathBuf::new();
+                        for c in comps {
+                            pbuf.push(c);
+                        }
+                        node.relative_path = pbuf;
+                    }
+                    filtered.push(node);
+                }
+            }
+            self.nodes = filtered;
+            self.folder_handle = target_sub.to_string();
+        }
+    }
 }
 
 /// Parses the 16-byte folder master share key from Base64URL string.

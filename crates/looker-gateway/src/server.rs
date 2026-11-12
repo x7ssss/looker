@@ -468,6 +468,49 @@ async fn handle_client(
         return Ok(());
     }
 
+    // Route 5e: System Default Download Directory API (GET /api/system/default-dir)
+    if method.eq_ignore_ascii_case("GET") && req_path == "/api/system/default-dir" {
+        let base_dir = crate::resolve_default_download_dir();
+        let json = serde_json::json!({
+            "base_dir": base_dir.to_string_lossy().to_string()
+        }).to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5f: System Native Folder Picker API (POST /api/system/pick-folder)
+    if method.eq_ignore_ascii_case("POST") && req_path == "/api/system/pick-folder" {
+        let selected_path = match rfd::AsyncFileDialog::new().pick_folder().await {
+            Some(folder_handle) => Some(folder_handle.path().to_string_lossy().to_string()),
+            None => None,
+        };
+        let json = serde_json::json!({
+            "path": selected_path
+        }).to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Favicon endpoint to eliminate 405 Method Not Allowed
+    if method.eq_ignore_ascii_case("GET") && req_path == "/favicon.ico" {
+        let resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
     // Route 6: Embedded Dashboard UI (GET /ui, GET /ui/*, GET /)
     if method.eq_ignore_ascii_case("GET")
         && (req_path == "/"

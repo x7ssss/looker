@@ -12,7 +12,8 @@ use looker_pool::ProxyPool;
 use looker_scraper::{CheckerConfig, ProxyChecker, ProxyScraper};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
-use tauri::Manager;
+use tauri::webview::NewWindowResponse;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -152,6 +153,23 @@ fn main() {
             }
 
             let _tray = tray_builder.build(app)?;
+
+            let _builder = WebviewWindowBuilder::new(
+                app,
+                "main",
+                WebviewUrl::External("http://127.0.0.1:8080/ui".parse().unwrap()),
+            )
+            .title("LOOKER // Network Control & Proxy Gateway")
+            .inner_size(1280.0, 800.0)
+            .min_inner_size(900.0, 600.0)
+            .center()
+            .resizable(true)
+            .background_color(tauri::window::Color(9, 9, 11, 255))
+            .on_new_window(|url, _features| {
+                let _ = opener::open(url.as_str());
+                NewWindowResponse::Deny
+            })
+            .build()?;
 
             Ok(())
         })

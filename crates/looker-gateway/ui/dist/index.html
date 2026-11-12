@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>LOOKER // Network Control & MEGA Studio</title>
+  <link rel="icon" href="data:," />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -156,26 +157,45 @@
         <!-- Node Checklist -->
         <div class="space-y-1.5 max-h-56 overflow-y-auto pr-1" id="inspect-nodes-list"></div>
 
-        <!-- Download Action & Destination -->
-        <div class="flex flex-wrap items-center justify-between gap-3 pt-3 border-t border-stroke">
-          <div class="flex items-center gap-2 text-xs">
-            <span class="text-zinc-400">Destination:</span>
+        <!-- Download Destination & Categories -->
+        <div class="space-y-3 pt-3 border-t border-stroke">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <span class="text-[11px] font-medium text-zinc-400 uppercase tracking-wider">Download Category</span>
+            <span class="text-zinc-500 mono text-xs" id="selection-summary-text">Selected: 0 files</span>
+          </div>
+          <div class="flex flex-wrap items-center gap-1.5" id="category-pills">
+            <button type="button" onclick="setCategory('')" id="cat-general" class="cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-white/15 text-white border border-white/25">General</button>
+            <button type="button" onclick="setCategory('Media')" id="cat-media" class="cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">Media &amp; Video</button>
+            <button type="button" onclick="setCategory('Software')" id="cat-software" class="cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">Software &amp; ISOs</button>
+            <button type="button" onclick="setCategory('Games')" id="cat-games" class="cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">Games</button>
+            <button type="button" onclick="setCategory('Archives')" id="cat-archives" class="cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">Archives</button>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-zinc-400 shrink-0">Destination:</span>
             <input
               type="text"
               id="output-dir-input"
-              value="./downloads"
-              class="px-2.5 py-1 rounded-md bg-surface border border-stroke text-xs text-zinc-200 outline-none focus:border-emerald-500/50 w-44 mono"
+              class="w-full px-3 py-1.5 rounded-lg bg-surface border border-stroke text-xs text-zinc-200 outline-none focus:border-emerald-500/50 mono transition-colors"
             />
-            <span class="text-zinc-500 mono ml-2" id="selection-summary-text">Selected: 0 files</span>
+            <button
+              type="button"
+              onclick="browseFolder()"
+              id="btn-browse-folder"
+              class="px-3 py-1.5 rounded-lg bg-surface hover:bg-panel border border-stroke text-xs text-zinc-300 hover:text-white transition-colors shrink-0 mono flex items-center gap-1.5"
+            >
+              <svg class="w-3.5 h-3.5 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+              <span>Browse...</span>
+            </button>
+            <button
+              type="button"
+              onclick="startDownload()"
+              id="btn-start-download"
+              class="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-obsidian font-semibold text-xs transition-colors flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+            >
+              <span>Start Download</span>
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
+            </button>
           </div>
-          <button
-            onclick="startDownload()"
-            id="btn-start-download"
-            class="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-obsidian font-semibold text-xs transition-colors flex items-center gap-1.5 disabled:opacity-50"
-          >
-            <span>Start Download</span>
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
-          </button>
         </div>
       </div>
 
@@ -261,6 +281,79 @@
     let currentProto = 'all';
     let inspectedData = null;
     let selectedHandles = new Set();
+    let defaultBaseDir = './downloads';
+    let currentCategory = '';
+
+    function joinPath(base, sub) {
+      if (!sub) return base;
+      if (!base) return sub;
+      const sep = base.includes('\\') ? '\\' : '/';
+      const cleanBase = base.endsWith('/') || base.endsWith('\\') ? base.slice(0, -1) : base;
+      return `${cleanBase}${sep}${sub}`;
+    }
+
+    function updateDestinationPath() {
+      const input = document.getElementById('output-dir-input');
+      if (input) {
+        input.value = joinPath(defaultBaseDir, currentCategory);
+      }
+    }
+
+    function setCategory(cat) {
+      currentCategory = cat;
+      const pills = {
+        '': document.getElementById('cat-general'),
+        'Media': document.getElementById('cat-media'),
+        'Software': document.getElementById('cat-software'),
+        'Games': document.getElementById('cat-games'),
+        'Archives': document.getElementById('cat-archives'),
+      };
+
+      for (const [key, btn] of Object.entries(pills)) {
+        if (!btn) continue;
+        if (key === cat) {
+          btn.className = 'cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-white/15 text-white border border-white/25';
+        } else {
+          btn.className = 'cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke';
+        }
+      }
+      updateDestinationPath();
+    }
+
+    async function fetchDefaultDir() {
+      try {
+        const res = await fetch('/api/system/default-dir');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.base_dir) {
+            defaultBaseDir = data.base_dir;
+            updateDestinationPath();
+          }
+        }
+      } catch (e) {}
+    }
+
+    async function browseFolder() {
+      const btn = document.getElementById('btn-browse-folder');
+      if (btn) btn.disabled = true;
+      try {
+        const res = await fetch('/api/system/pick-folder', { method: 'POST' });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.path) {
+            document.getElementById('output-dir-input').value = data.path;
+            const pills = document.querySelectorAll('.cat-pill');
+            pills.forEach(p => {
+              p.className = 'cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke';
+            });
+          }
+        }
+      } catch (e) {
+        console.error('Folder picker error:', e);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
 
     function formatBytes(bytes) {
       if (!bytes || bytes === 0) return '0 B';
@@ -620,6 +713,7 @@
     fetchFastest();
     fetchProxies();
     fetchTasks();
+    fetchDefaultDir();
   </script>
 </body>
 </html>

@@ -391,4 +391,27 @@ async fn test_gateway_live_and_status_endpoints() {
     let resp_str9 = String::from_utf8_lossy(&resp_buf9[..n9]);
     assert!(resp_str9.starts_with("HTTP/1.1 400 Bad Request"));
     assert!(resp_str9.contains("\"error\""));
+
+    // 10. Test GET /api/system/default-dir
+    let mut client10 = TcpStream::connect(gateway_addr).await.unwrap();
+    client10
+        .write_all(b"GET /api/system/default-dir HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp_buf10 = vec![0u8; 1024];
+    let n10 = client10.read(&mut resp_buf10).await.unwrap();
+    let resp_str10 = String::from_utf8_lossy(&resp_buf10[..n10]);
+    assert!(resp_str10.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str10.contains("\"base_dir\""));
+
+    // 11. Test GET /favicon.ico (eliminated 405 error)
+    let mut client11 = TcpStream::connect(gateway_addr).await.unwrap();
+    client11
+        .write_all(b"GET /favicon.ico HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp_buf11 = vec![0u8; 1024];
+    let n11 = client11.read(&mut resp_buf11).await.unwrap();
+    let resp_str11 = String::from_utf8_lossy(&resp_buf11[..n11]);
+    assert!(resp_str11.starts_with("HTTP/1.1 204 No Content"));
 }

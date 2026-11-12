@@ -177,7 +177,14 @@ impl MegaClient {
         match api_resp {
             FolderTreeApiResponse::Success(mut list) => {
                 let first = list.pop().ok_or(MegaError::NotFound)?;
-                parse_folder_tree(&link.handle, &folder_share_key, first.f)
+                let mut tree = parse_folder_tree(&link.handle, &folder_share_key, first.f)?;
+                tree.apply_scope(
+                    link.sub_folder_id.as_deref(),
+                    link.target_file_id
+                        .as_deref()
+                        .or(link.subfile_handle.as_deref()),
+                );
+                Ok(tree)
             }
             FolderTreeApiResponse::ErrorArray(errs) => {
                 let err = errs.first().copied().unwrap_or(-1);
