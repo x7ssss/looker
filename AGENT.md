@@ -254,7 +254,7 @@
   - Left-clicking system tray icon restores and focuses main window.
 - [x] CI/CD Workflow (`.github/workflows/release.yml`):
   - Updated Windows release matrix to install Tauri CLI and build the NSIS installer via `cargo tauri build --target x86_64-pc-windows-msvc --bundles nsis`.
-  - Packages standalone NSIS installer as `Looker_x64-setup.exe` in `dist/` alongside portable zip archives and SHA-256 checksums.
+  - Packages standalone NSIS installer as `Looker-Setup-x64.exe` (and `Looker_x64-setup.exe`) in `dist/` alongside portable zip archives and SHA-256 checksums.
 
 ---
 
