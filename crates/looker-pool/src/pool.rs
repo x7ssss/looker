@@ -113,6 +113,7 @@ impl ProxyPool {
         {
             existing.record_success(proxy.latency);
             existing.consecutive_failures.store(0, Ordering::Relaxed);
+            existing.total_failures.store(0, Ordering::Relaxed);
             existing.healthy.store(true, Ordering::Release);
             existing.circuit_open_until_epoch_ms.store(0, Ordering::Relaxed);
         } else {
@@ -271,19 +272,112 @@ impl ProxyPool {
         items.iter().map(|i| i.snapshot()).collect()
     }
 
+    /// Permanently removes a proxy from the registry and fastest cache.
+    pub fn remove_item(&self, addr: SocketAddr, proto: ProxyProto) -> bool {
+        let removed = {
+            let mut items = self.items.write();
+            let before = items.len();
+            items.retain(|i| !(i.addr == addr && i.proto == proto));
+            items.len() < before
+        };
+
+        if removed {
+            let mut fastest = self.fastest.write();
+            fastest.retain(|p| !(p.addr == addr && p.proto == proto));
+            self.working_count.store(self.healthy_count(), Ordering::Relaxed);
+        }
+
+        removed
+    }
+
+    /// Permanently evicts a proxy (alias for remove_item).
+    pub fn evict(&self, addr: SocketAddr, proto: ProxyProto) -> bool {
+        self.remove_item(addr, proto)
+    }
+
+    /// Permanently prunes any proxies with cumulative lifetime failures >= 3.
+    pub fn prune_dead(&self) -> usize {
+        let mut items = self.items.write();
+        let before = items.len();
+        items.retain(|i| i.total_failures.load(Ordering::Relaxed) < 3);
+        let pruned = before - items.len();
+
+        if pruned > 0 {
+            let mut fastest = self.fastest.write();
+            fastest.retain(|p| items.iter().any(|i| i.addr == p.addr && i.proto == p.proto));
+            self.working_count.store(
+                items.iter().filter(|i| i.is_healthy()).count(),
+                Ordering::Relaxed,
+            );
+        }
+
+        pruned
+    }
+
+    /// Handles a check failure during validation:
+    /// - If the proxy is quarantined (unhealthy), failed re-verification evicts it immediately.
+    /// - If the proxy is healthy, records failure. If total_failures >= 3, evicts it immediately.
+    pub fn handle_check_failure(&self, addr: SocketAddr, proto: Option<ProxyProto>) {
+        let mut evict_targets = Vec::new();
+
+        {
+            let items = self.items.read();
+            for item in items.iter() {
+                if item.addr == addr && proto.map_or(true, |p| p == item.proto) {
+                    if !item.is_healthy() {
+                        // Quarantined node failed re-verification: strike 3 / permanent eviction
+                        evict_targets.push((item.addr, item.proto));
+                    } else {
+                        let (_quarantined, total) = item.record_failure(self.default_cooldown);
+                        if total >= 3 {
+                            evict_targets.push((item.addr, item.proto));
+                        }
+                    }
+                }
+            }
+        }
+
+        for (a, p) in evict_targets {
+            self.remove_item(a, p);
+        }
+    }
+
     pub fn record_failure(&self, item: &ProxyItem) {
-        item.record_failure(self.default_cooldown);
+        let (_quarantined, total) = item.record_failure(self.default_cooldown);
+        if total >= 3 {
+            self.remove_item(item.addr, item.proto);
+        }
     }
 
     pub fn record_failure_by_addr(&self, addr: SocketAddr, proto: ProxyProto) {
-        let items = self.items.read();
-        if let Some(item) = items.iter().find(|i| i.addr == addr && i.proto == proto) {
-            item.record_failure(self.default_cooldown);
+        let should_remove = {
+            let items = self.items.read();
+            if let Some(item) = items.iter().find(|i| i.addr == addr && i.proto == proto) {
+                let (_quarantined, total) = item.record_failure(self.default_cooldown);
+                total >= 3
+            } else {
+                false
+            }
+        };
+
+        if should_remove {
+            self.remove_item(addr, proto);
         }
     }
 
     pub fn record_success(&self, item: &ProxyItem, latency: Duration) {
         item.record_success(latency);
+    }
+
+    /// Exports all currently healthy proxies to the specified directory hierarchy:
+    /// - <out_dir>/proxies.json
+    /// - <out_dir>/proxies/all.txt
+    /// - <out_dir>/proxies/http.txt
+    /// - <out_dir>/proxies/socks4.txt
+    /// - <out_dir>/proxies/socks5.txt
+    pub fn export_to_dir(&self, out_dir: &std::path::Path) -> std::io::Result<()> {
+        let healthy = self.healthy_checked();
+        export_disk_hierarchy(out_dir, &healthy)
     }
 
     pub fn stats(&self) -> PoolStats {
@@ -442,6 +536,53 @@ impl ProxyPool {
     }
 }
 
+/// Exports protocol-segregated proxy hierarchy to disk with clean live survivors only.
+pub fn export_disk_hierarchy(out_dir: &std::path::Path, proxies: &[CheckedProxy]) -> std::io::Result<()> {
+    std::fs::create_dir_all(out_dir)?;
+    let sub_dir = out_dir.join("proxies");
+    std::fs::create_dir_all(&sub_dir)?;
+
+    // 1. out/proxies.json
+    let json_path = out_dir.join("proxies.json");
+    let json_file = std::fs::File::create(&json_path)?;
+    serde_json::to_writer_pretty(json_file, proxies)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+    // 2. out/proxies/all.txt (proto://host:port)
+    let all_path = sub_dir.join("all.txt");
+    let mut all_file = std::fs::File::create(&all_path)?;
+    for p in proxies {
+        use std::io::Write;
+        writeln!(all_file, "{}", p.to_url())?;
+    }
+
+    // 3. out/proxies/http.txt (host:port)
+    let http_path = sub_dir.join("http.txt");
+    let mut http_file = std::fs::File::create(&http_path)?;
+    for p in proxies.iter().filter(|p| p.proto == ProxyProto::HttpConnect) {
+        use std::io::Write;
+        writeln!(http_file, "{}", p.addr)?;
+    }
+
+    // 4. out/proxies/socks4.txt (host:port)
+    let socks4_path = sub_dir.join("socks4.txt");
+    let mut socks4_file = std::fs::File::create(&socks4_path)?;
+    for p in proxies.iter().filter(|p| p.proto == ProxyProto::Socks4) {
+        use std::io::Write;
+        writeln!(socks4_file, "{}", p.addr)?;
+    }
+
+    // 5. out/proxies/socks5.txt (host:port)
+    let socks5_path = sub_dir.join("socks5.txt");
+    let mut socks5_file = std::fs::File::create(&socks5_path)?;
+    for p in proxies.iter().filter(|p| p.proto == ProxyProto::Socks5) {
+        use std::io::Write;
+        writeln!(socks5_file, "{}", p.addr)?;
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,5 +697,77 @@ mod tests {
 
         let all_items = pool.api_proxies(None, None);
         assert_eq!(all_items.len(), 3);
+    }
+
+    #[test]
+    fn test_hard_3_strike_eviction() {
+        let pool = ProxyPool::new();
+        let addr: SocketAddr = "4.4.4.4:8080".parse().unwrap();
+        pool.add(addr, ProxyProto::HttpConnect, None);
+
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.healthy_count(), 1);
+
+        let item = pool.select(SelectionStrategy::RoundRobin).unwrap();
+
+        // Strike 1: still healthy (needs 2 consecutive to quarantine)
+        pool.record_failure(&item);
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.healthy_count(), 1);
+        assert_eq!(item.total_failures.load(Ordering::Relaxed), 1);
+
+        // Strike 2: quarantined (healthy = false)
+        pool.record_failure(&item);
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.healthy_count(), 0);
+        assert_eq!(pool.quarantined_count(), 1);
+        assert_eq!(item.total_failures.load(Ordering::Relaxed), 2);
+
+        // Strike 3: hard eviction! Proxy permanently removed from pool
+        pool.record_failure(&item);
+        assert_eq!(pool.total_count(), 0);
+        assert_eq!(pool.healthy_count(), 0);
+        assert_eq!(pool.quarantined_count(), 0);
+
+        // Pool stats reflect removal
+        let stats = pool.stats();
+        assert_eq!(stats.total_proxies, 0);
+    }
+
+    #[test]
+    fn test_quarantine_failed_reverification_eviction() {
+        let pool = ProxyPool::new();
+        let addr: SocketAddr = "5.5.5.5:8080".parse().unwrap();
+        pool.add(addr, ProxyProto::HttpConnect, None);
+
+        let item = pool.select(SelectionStrategy::RoundRobin).unwrap();
+        // Quarantine it with 2 failures
+        pool.record_failure(&item);
+        pool.record_failure(&item);
+        assert_eq!(pool.quarantined_count(), 1);
+        assert_eq!(pool.total_count(), 1);
+
+        // Re-verification fails -> handle_check_failure evicts it immediately
+        pool.handle_check_failure(addr, Some(ProxyProto::HttpConnect));
+        assert_eq!(pool.total_count(), 0);
+        assert_eq!(pool.quarantined_count(), 0);
+    }
+
+    #[test]
+    fn test_export_to_dir_clean_sync() {
+        let temp_dir = std::env::temp_dir().join(format!("looker_test_export_{}", rand::random::<u32>()));
+        let pool = ProxyPool::new();
+        let addr: SocketAddr = "6.6.6.6:8080".parse().unwrap();
+        pool.add(addr, ProxyProto::HttpConnect, None);
+
+        assert!(pool.export_to_dir(&temp_dir).is_ok());
+
+        assert!(temp_dir.join("proxies.json").exists());
+        assert!(temp_dir.join("proxies/all.txt").exists());
+        assert!(temp_dir.join("proxies/http.txt").exists());
+        assert!(temp_dir.join("proxies/socks4.txt").exists());
+        assert!(temp_dir.join("proxies/socks5.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

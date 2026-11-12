@@ -61,6 +61,26 @@ fn main() {
                     None,
                 ));
 
+                // Priority Warm-Boot Seeding: load previous survivors from out/proxies.json
+                let warm_file = std::path::Path::new("out/proxies.json");
+                let warm_candidates = looker_scraper::load_warm_boot_candidates(warm_file);
+                if !warm_candidates.is_empty() {
+                    info!(
+                        "[LOOKER APP] Warm-boot: priority-checking {} cached survivor proxies from {}...",
+                        warm_candidates.len(),
+                        warm_file.display()
+                    );
+                    let _ = checker
+                        .check_all_streaming(warm_candidates, Arc::clone(&pool_scrape))
+                        .await;
+                    let stats = pool_scrape.stats();
+                    info!(
+                        "[LOOKER APP WARM-BOOT COMPLETE] {} healthy proxies available immediately (avg latency: {} ms)",
+                        stats.healthy_proxies, stats.avg_latency_ms
+                    );
+                    let _ = pool_scrape.export_to_dir(std::path::Path::new("out"));
+                }
+
                 loop {
                     if scraper_cancel.is_cancelled() {
                         break;
@@ -68,10 +88,36 @@ fn main() {
 
                     info!("[LOOKER APP] Running periodic candidate scrape & validation...");
                     if let Ok(candidates) = scraper.collect_all().await {
-                        if !candidates.is_empty() {
+                        let mut all_to_check = candidates;
+                        let quarantined = pool_scrape.list_quarantined();
+                        if !quarantined.is_empty() {
+                            for q in quarantined {
+                                all_to_check.push(looker_scraper::CandidateProxy::new(q.addr, Some(q.proto)));
+                            }
+                        }
+
+                        if !all_to_check.is_empty() {
                             let _ = checker
-                                .check_all_streaming(candidates, Arc::clone(&pool_scrape))
+                                .check_all_streaming(all_to_check, Arc::clone(&pool_scrape))
                                 .await;
+                        }
+
+                        // Hard 3-strike prune
+                        let pruned = pool_scrape.prune_dead();
+                        if pruned > 0 {
+                            tracing::debug!("[LOOKER APP] Pruned {} dead proxies with >= 3 failures", pruned);
+                        }
+
+                        // Periodic Clean Disk Sync
+                        let out_dir = std::path::Path::new("out");
+                        if let Err(e) = pool_scrape.export_to_dir(out_dir) {
+                            tracing::warn!("[LOOKER APP] Periodic disk sync failed: {}", e);
+                        } else {
+                            info!(
+                                "[LOOKER APP] Periodic disk sync: synchronized {} healthy proxies to {}/ (zero dead clutter)",
+                                pool_scrape.healthy_count(),
+                                out_dir.display()
+                            );
                         }
                     }
 
@@ -125,11 +171,7 @@ fn main() {
                         info!("[LOOKER APP] Quit requested from tray menu. Shutting down...");
                         cancel_tray.cancel();
                         let out_dir = std::path::Path::new("out");
-                        let _ = std::fs::create_dir_all(out_dir);
-                        let _ = std::fs::write(
-                            out_dir.join("proxies_last_shutdown.txt"),
-                            pool_tray.export_live_text(),
-                        );
+                        let _ = pool_tray.export_to_dir(out_dir);
                         app.exit(0);
                     }
                     _ => {}

@@ -239,6 +239,8 @@ impl ProxyChecker {
                 if let Some(ref checked) = res {
                     pool_clone.add_or_update(checked.clone());
                     pool_clone.inc_working();
+                } else {
+                    pool_clone.handle_check_failure(candidate.addr, candidate.proto);
                 }
 
                 res
@@ -252,6 +254,7 @@ impl ProxyChecker {
             }
         }
 
+        pool.prune_dead();
         pool.set_scraping(false);
         info!("Streaming validation pipeline completed: {} proxies survived", verified.len());
         verified

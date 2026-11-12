@@ -14,6 +14,7 @@ ipnet = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 socket2 = { workspace = true }
 looker-protocol = { workspace = true }
 looker-geo = { workspace = true }

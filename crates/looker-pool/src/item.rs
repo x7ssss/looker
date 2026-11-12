@@ -67,6 +67,7 @@ pub struct ProxySnapshot {
     pub latency_ms: u64,
     pub healthy: bool,
     pub consecutive_failures: u32,
+    pub total_failures: u32,
     pub total_requests: u64,
     pub successful_requests: u64,
     pub anonymity: AnonymityLevel,
@@ -80,6 +81,7 @@ pub struct ProxyItem {
     pub proto: ProxyProto,
     pub latency_ms: AtomicU64,
     pub consecutive_failures: AtomicU32,
+    pub total_failures: AtomicU32,
     pub total_requests: AtomicU64,
     pub successful_requests: AtomicU64,
     pub circuit_open_until_epoch_ms: AtomicU64,
@@ -104,6 +106,7 @@ impl ProxyItem {
             proto,
             latency_ms: AtomicU64::new(latency.as_millis() as u64),
             consecutive_failures: AtomicU32::new(0),
+            total_failures: AtomicU32::new(0),
             total_requests: AtomicU64::new(0),
             successful_requests: AtomicU64::new(0),
             circuit_open_until_epoch_ms: AtomicU64::new(0),
@@ -148,13 +151,14 @@ impl ProxyItem {
         self.latency_ms.store(new_ms, Ordering::Relaxed);
     }
 
-    /// Records a connection failure. If errors >= 2, marks healthy = false and trips circuit breaker.
-    /// Returns true if proxy was quarantined by this failure.
-    pub fn record_failure(&self, cooldown: Duration) -> bool {
+    /// Records a connection failure. If consecutive errors >= 2, marks healthy = false and trips circuit breaker.
+    /// Returns (quarantined, total_failures).
+    pub fn record_failure(&self, cooldown: Duration) -> (bool, u32) {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         let fails = self.consecutive_failures.fetch_add(1, Ordering::SeqCst) + 1;
+        let total = self.total_failures.fetch_add(1, Ordering::SeqCst) + 1;
 
-        if fails >= 2 {
+        let quarantined = if fails >= 2 {
             self.healthy.store(false, Ordering::Release);
             let until = current_epoch_ms() + (cooldown.as_millis() as u64);
             self.circuit_open_until_epoch_ms
@@ -162,7 +166,8 @@ impl ProxyItem {
             true
         } else {
             false
-        }
+        };
+        (quarantined, total)
     }
 
     pub fn latency(&self) -> Option<Duration> {
@@ -194,6 +199,7 @@ impl ProxyItem {
             latency_ms: self.latency_ms.load(Ordering::Relaxed),
             healthy: self.is_healthy(),
             consecutive_failures: self.consecutive_failures.load(Ordering::Relaxed),
+            total_failures: self.total_failures.load(Ordering::Relaxed),
             total_requests: self.total_requests.load(Ordering::Relaxed),
             successful_requests: self.successful_requests.load(Ordering::Relaxed),
             anonymity: self.anonymity,

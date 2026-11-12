@@ -288,6 +288,29 @@
 - [x] `looker-gateway`: Wired direct metadata resolution in `POST /api/mega/inspect` and `POST /api/mega/download` via `MegaClient::new(Some(&gateway_url))`.
 - [x] Integration tests: Added `test_mega_error_chain_formatting` and `test_mega_client_direct_and_gateway_routing` in `crates/looker-mega/tests/crypto_tests.rs`.
 
+### Phase 12: Warm-Boot Proxy Seeding, Hard 3-Strike Eviction, and Periodic Clean Exports
+- [x] `looker-pool`:
+  - Added cumulative lifetime failure tracking (`total_failures: AtomicU32` in `ProxyItem` and `total_failures: u32` in `ProxySnapshot`).
+  - Implemented Hard 3-Strike Eviction: When a proxy reaches 3 total failures in `record_failure` or `record_failure_by_addr`, it is permanently removed from the registry (`self.remove_item`) and fastest cache.
+  - Implemented `ProxyPool::handle_check_failure`: If a quarantined proxy fails background re-verification, it is immediately evicted with zero retry delay.
+  - Implemented `ProxyPool::prune_dead(&self) -> usize` removing all nodes with `total_failures >= 3`.
+  - Implemented `export_disk_hierarchy` and `ProxyPool::export_to_dir(&self, out_dir: &Path)` synchronizing clean survivor-only dumps to disk:
+    * `out/proxies.json` (structured JSON with latency and geo)
+    * `out/proxies/all.txt` (`proto://host:port`)
+    * `out/proxies/http.txt`, `socks4.txt`, `socks5.txt` (raw `host:port`)
+- [x] `looker-scraper`:
+  - Implemented `load_warm_boot_candidates<P: AsRef<Path>>(path: P) -> Vec<CandidateProxy>` reading previously saved survivors from `out/proxies.json`.
+  - In `check_all_streaming`: checks surviving candidates and invokes `pool.handle_check_failure` on failed probes, followed by `pool.prune_dead()`.
+- [x] `looker-proxy` & `looker-app`:
+  - Priority Warm-Boot Seeding: On daemon/app startup, checks `out/proxies.json` and priority-verifies cached survivors through the streaming pipeline before fresh 52-source harvest, guaranteeing operational rotating proxies within 1-2 seconds of launch.
+  - Periodic Clean Disk Sync: Automatically updates `out/proxies.json` and `out/proxies/*.txt` after every validation cycle (and on graceful shutdown/quit), eliminating dead proxy clutter.
+- [x] Unit & Integration Tests:
+  - Verified `test_hard_3_strike_eviction` in `looker-pool` (asserts registry proxy count decrements to 0 after 3 strikes).
+  - Verified `test_quarantine_failed_reverification_eviction` in `looker-pool`.
+  - Verified `test_export_to_dir_clean_sync` in `looker-pool`.
+  - Verified `test_load_warm_boot_candidates` in `looker-scraper`.
+  - Full workspace test suite passes with 34 green unit and integration tests.
+
 ---
 
 ## 5. Session Instructions for Future Agents

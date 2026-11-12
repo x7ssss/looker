@@ -121,3 +121,98 @@ impl ProxyScraper {
         self.collect_all().await
     }
 }
+
+/// Loads previously saved survivor proxies from disk (`out/proxies.json`) for warm-boot priority seeding.
+/// Gracefully handles `CheckedProxy` format, `ProxySnapshot` format, or raw candidate arrays.
+pub fn load_warm_boot_candidates<P: AsRef<std::path::Path>>(path: P) -> Vec<CandidateProxy> {
+    let p = path.as_ref();
+    if !p.exists() {
+        return Vec::new();
+    }
+
+    let content = match std::fs::read_to_string(p) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    // 1. Try parsing as Vec<looker_pool::CheckedProxy>
+    if let Ok(checked) = serde_json::from_str::<Vec<looker_pool::CheckedProxy>>(&content) {
+        for cp in checked {
+            if !crate::bogon::is_bogon(cp.addr.ip()) && seen.insert((cp.addr, cp.proto)) {
+                candidates.push(CandidateProxy::new(cp.addr, Some(cp.proto)));
+            }
+        }
+        if !candidates.is_empty() {
+            return candidates;
+        }
+    }
+
+    // 2. Try parsing as Vec<looker_pool::ProxySnapshot>
+    if let Ok(snapshots) = serde_json::from_str::<Vec<looker_pool::ProxySnapshot>>(&content) {
+        for ps in snapshots {
+            if ps.healthy && !crate::bogon::is_bogon(ps.addr.ip()) && seen.insert((ps.addr, ps.proto)) {
+                candidates.push(CandidateProxy::new(ps.addr, Some(ps.proto)));
+            }
+        }
+        if !candidates.is_empty() {
+            return candidates;
+        }
+    }
+
+    candidates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use looker_pool::{AnonymityLevel, CheckedProxy};
+    use looker_protocol::ProxyProto;
+    use std::net::SocketAddr;
+
+    #[test]
+    fn test_load_warm_boot_candidates() {
+        let now_nano = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("looker_warm_test_{}", now_nano));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let json_file = temp_dir.join("proxies.json");
+
+        let addr1: SocketAddr = "1.2.3.4:8080".parse().unwrap();
+        let addr2: SocketAddr = "5.6.7.8:1080".parse().unwrap();
+        let proxies = vec![
+            CheckedProxy {
+                addr: addr1,
+                proto: ProxyProto::HttpConnect,
+                latency: Duration::from_millis(50),
+                exit_ip: None,
+                anonymity: AnonymityLevel::Elite,
+                geo: None,
+            },
+            CheckedProxy {
+                addr: addr2,
+                proto: ProxyProto::Socks5,
+                latency: Duration::from_millis(100),
+                exit_ip: None,
+                anonymity: AnonymityLevel::Elite,
+                geo: None,
+            },
+        ];
+
+        let serialized = serde_json::to_string_pretty(&proxies).unwrap();
+        std::fs::write(&json_file, serialized).unwrap();
+
+        let candidates = load_warm_boot_candidates(&json_file);
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].addr, addr1);
+        assert_eq!(candidates[0].proto, Some(ProxyProto::HttpConnect));
+        assert_eq!(candidates[1].addr, addr2);
+        assert_eq!(candidates[1].proto, Some(ProxyProto::Socks5));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+}

@@ -1,5 +1,3 @@
-use std::fs;
-use std::io::Write;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,9 +13,11 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use looker_gateway::{GatewayConfig, ProxyGateway};
 use looker_geo::GeoResolver;
-use looker_pool::{CheckedProxy, ProxyPool};
-use looker_protocol::ProxyProto;
-use looker_scraper::{resolve_direct_ip, CheckerConfig, ProxyChecker, ProxyScraper, DEFAULT_SOURCES};
+use looker_pool::{export_disk_hierarchy, ProxyPool};
+use looker_scraper::{
+    load_warm_boot_candidates, resolve_direct_ip, CheckerConfig, ProxyChecker, ProxyScraper,
+    DEFAULT_SOURCES,
+};
 
 #[derive(Parser, Debug)]
 #[command(name = "looker-proxy", version, about = "High-speed rotating proxy infrastructure daemon")]
@@ -76,48 +76,6 @@ enum Commands {
         #[arg(long)]
         asn_db: Option<PathBuf>,
     },
-}
-
-fn export_disk_hierarchy(out_dir: &Path, proxies: &[CheckedProxy]) -> std::io::Result<()> {
-    fs::create_dir_all(out_dir)?;
-    let sub_dir = out_dir.join("proxies");
-    fs::create_dir_all(&sub_dir)?;
-
-    // 1. out/proxies.json
-    let json_path = out_dir.join("proxies.json");
-    let json_file = fs::File::create(&json_path)?;
-    serde_json::to_writer_pretty(json_file, proxies)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-
-    // 2. out/proxies/all.txt (proto://host:port)
-    let all_path = sub_dir.join("all.txt");
-    let mut all_file = fs::File::create(&all_path)?;
-    for p in proxies {
-        writeln!(all_file, "{}", p.to_url())?;
-    }
-
-    // 3. out/proxies/http.txt (host:port)
-    let http_path = sub_dir.join("http.txt");
-    let mut http_file = fs::File::create(&http_path)?;
-    for p in proxies.iter().filter(|p| p.proto == ProxyProto::HttpConnect) {
-        writeln!(http_file, "{}", p.addr)?;
-    }
-
-    // 4. out/proxies/socks4.txt (host:port)
-    let socks4_path = sub_dir.join("socks4.txt");
-    let mut socks4_file = fs::File::create(&socks4_path)?;
-    for p in proxies.iter().filter(|p| p.proto == ProxyProto::Socks4) {
-        writeln!(socks4_file, "{}", p.addr)?;
-    }
-
-    // 5. out/proxies/socks5.txt (host:port)
-    let socks5_path = sub_dir.join("socks5.txt");
-    let mut socks5_file = fs::File::create(&socks5_path)?;
-    for p in proxies.iter().filter(|p| p.proto == ProxyProto::Socks5) {
-        writeln!(socks5_file, "{}", p.addr)?;
-    }
-
-    Ok(())
 }
 
 fn init_geo_resolver(city_db: Option<&Path>, asn_db: Option<&Path>) -> Arc<GeoResolver> {
@@ -203,6 +161,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 DEFAULT_SOURCES.len()
             );
 
+            // Priority Warm-Boot Seeding: load previous survivors from out/proxies.json
+            let warm_file = Path::new("out/proxies.json");
+            let warm_candidates = load_warm_boot_candidates(warm_file);
+            if !warm_candidates.is_empty() {
+                info!(
+                    "Warm-boot: priority-checking {} cached survivor proxies from {}...",
+                    warm_candidates.len(),
+                    warm_file.display()
+                );
+                let _ = checker
+                    .check_all_streaming(warm_candidates, Arc::clone(&pool))
+                    .await;
+                let stats = pool.stats();
+                info!(
+                    "[WARM-BOOT COMPLETE] {} healthy proxies available immediately (avg latency: {} ms)",
+                    stats.healthy_proxies, stats.avg_latency_ms
+                );
+                // Synchronize disk hierarchy with verified warm survivors
+                let _ = pool.export_to_dir(Path::new("out"));
+            } else {
+                info!(
+                    "No warm-boot cache found at {}; proceeding with fresh harvest.",
+                    warm_file.display()
+                );
+            }
+
             // Spawn background active validation pipeline with cancellation support
             let pool_clone = Arc::clone(&pool);
             let scraper_clone = Arc::clone(&scraper);
@@ -242,6 +226,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let _verified = checker_clone
                             .check_all_streaming(all_to_check, Arc::clone(&pool_clone))
                             .await;
+                    }
+
+                    // 4. Hard 3-strike dead prune
+                    let pruned = pool_clone.prune_dead();
+                    if pruned > 0 {
+                        debug!("Pruned {} dead proxies with >= 3 failures", pruned);
+                    }
+
+                    // 5. Periodic Clean Disk Sync: overwrite out/proxies.json and out/proxies/*.txt
+                    let out_dir = Path::new("out");
+                    match pool_clone.export_to_dir(out_dir) {
+                        Ok(_) => {
+                            let healthy_count = pool_clone.healthy_count();
+                            info!(
+                                "Periodic disk sync: synchronized {} healthy proxies to {}/ (zero dead clutter)",
+                                healthy_count,
+                                out_dir.display()
+                            );
+                        }
+                        Err(e) => {
+                            warn!("Failed periodic disk sync to {}: {}", out_dir.display(), e);
+                        }
                     }
 
                     let stats = pool_clone.stats();
@@ -291,13 +297,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let gateway = ProxyGateway::new(config, Arc::clone(&pool));
             gateway.run_with_cancellation(cancel_token.clone()).await?;
 
-            // Graceful shutdown completed: export protocol-segregated proxy hierarchy
+            // Graceful shutdown completed: export clean protocol-segregated proxy hierarchy
             let out_dir = Path::new("out");
-            let healthy = pool.healthy_checked();
-            match export_disk_hierarchy(out_dir, &healthy) {
+            match pool.export_to_dir(out_dir) {
                 Ok(_) => info!(
                     "Exported {} healthy proxies to {}/ on shutdown (proxies.json & proxies/*.txt).",
-                    healthy.len(),
+                    pool.healthy_count(),
                     out_dir.display()
                 ),
                 Err(e) => warn!("Failed to write proxy hierarchy to {}: {}", out_dir.display(), e),
