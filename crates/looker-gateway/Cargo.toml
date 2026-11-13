@@ -22,7 +22,7 @@ looker-pool = { workspace = true }
 looker-mega = { workspace = true }
 reqwest = { workspace = true }
 dirs = { workspace = true }
-rfd = { workspace = true }
+rfd = { workspace = true, features = ["xdg-portal"] }
 opener = { workspace = true }
 parking_lot = { workspace = true }
 

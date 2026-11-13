@@ -509,6 +509,21 @@
   - Production release build `cargo build --release -p looker-app` compiles cleanly without warnings or release devtools.
   - Project marked 100% production-ready for v0.1.0 public release.
 
+### Phase 18: Multi-Platform (Windows & Linux x64) Fast CI/CD & RFD Portal Integration
+- [x] RFD Linux Native File Dialogs:
+  - Enabled `xdg-portal` feature on `rfd` dependency in `Cargo.toml`, `crates/looker-app/Cargo.toml`, and `crates/looker-gateway/Cargo.toml`.
+  - Ensures folder picker dialogs integrate natively across Wayland and X11 without GTK panics.
+- [x] Workspace Metadata & Warning Cleanup:
+  - Inherited `rust-version`, `readme`, `repository`, `homepage`, and `description` in `crates/looker-app/Cargo.toml` via `.workspace = true`.
+  - Fixed 5 unused manifest package key warnings; `cargo check --workspace` produces 0 warnings and 0 errors.
+- [x] Untracked `.cargo/config.toml`:
+  - Added `.cargo/config.toml` to `.gitignore` and removed from git cache (`git rm --cached .cargo/config.toml`), ensuring CI runners use default system linkers while local PC retains `rust-lld.exe`.
+- [x] High-Speed Windows & Linux GitHub Actions CI/CD (`release.yml`):
+  - Stripped macOS and cross-compiled musl matrix jobs.
+  - Added `Swatinem/rust-cache@v2` and `taiki-e/install-action@v2` (fetching prebuilt `tauri-cli` binary in ~3s instead of ~10m compilation).
+  - Parallel native build jobs: `windows-latest` (produces `Looker-Setup-x64.exe`) and `ubuntu-22.04` (produces `Looker-Linux-x64.AppImage` and `Looker-Linux-x64.deb`).
+  - Dedicated publish job computing SHA-256 checksums and publishing assets via `softprops/action-gh-release@v2`.
+
 ---
 
 ## 5. Session Instructions for Future Agents

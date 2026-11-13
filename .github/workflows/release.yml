@@ -10,142 +10,130 @@ permissions:
   contents: write
 
 jobs:
-  build-release:
-    name: Build - ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            use_cross: false
-            archive_ext: zip
-            bin_ext: .exe
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-            use_cross: true
-            archive_ext: tar.gz
-            bin_ext: ''
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-latest
-            use_cross: true
-            archive_ext: tar.gz
-            bin_ext: ''
-          - target: x86_64-apple-darwin
-            os: macos-13
-            use_cross: false
-            archive_ext: tar.gz
-            bin_ext: ''
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            use_cross: false
-            archive_ext: tar.gz
-            bin_ext: ''
-
+  build-windows:
+    name: Build - Windows (x64)
+    runs-on: windows-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Tauri CLI
+        uses: taiki-e/install-action@v2
         with:
-          targets: ${{ matrix.target }}
+          tool: tauri-cli
 
-      - name: Install cross-rs (for Linux musl targets)
-        if: matrix.use_cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Run workspace tests (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Run workspace tests
         run: cargo test --workspace
 
-      - name: Build release binaries (cross)
-        if: matrix.use_cross
-        run: cross build --release --target ${{ matrix.target }} -p looker-proxy -p looker-down
-
-      - name: Build release binaries (native cargo - Unix)
-        if: "!matrix.use_cross && matrix.os != 'windows-latest'"
-        run: cargo build --release --target ${{ matrix.target }} -p looker-proxy -p looker-down
-
-      - name: Build release binaries (native cargo - Windows)
-        if: matrix.os == 'windows-latest'
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Install Tauri CLI (Windows)
-        if: matrix.os == 'windows-latest'
-        run: cargo install tauri-cli --version "^2.0.0" --locked
-
-      - name: Build Tauri NSIS installer (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Build Tauri NSIS installer
         shell: pwsh
         run: |
           cd crates/looker-app
-          cargo tauri build --target ${{ matrix.target }} --bundles nsis
+          cargo tauri build --bundles nsis
 
-      - name: Package artifacts (Windows)
-        if: matrix.os == 'windows-latest'
+      - name: Prepare Windows artifact
         shell: pwsh
         run: |
-          $TAG = "${{ github.ref_name }}"
-          if ($TAG -eq "" -or $TAG.StartsWith("refs/")) { $TAG = "nightly" }
-          $ARCHIVE_NAME = "looker-$TAG-${{ matrix.target }}"
-          New-Item -ItemType Directory -Path "dist/$ARCHIVE_NAME" -Force | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/looker-proxy.exe" -Destination "dist/$ARCHIVE_NAME/"
-          Copy-Item "target/${{ matrix.target }}/release/looker-down.exe" -Destination "dist/$ARCHIVE_NAME/"
-          Copy-Item "README.md" -Destination "dist/$ARCHIVE_NAME/"
-          Copy-Item "AGENT.md" -Destination "dist/$ARCHIVE_NAME/"
-          Compress-Archive -Path "dist/$ARCHIVE_NAME" -DestinationPath "dist/$ARCHIVE_NAME.zip" -Force
-
-          # Find and copy generated NSIS setup installer to dist/Looker-Setup-x64.exe
-          $NSIS_SETUP = Get-ChildItem -Path "target/${{ matrix.target }}/release/bundle/nsis/*setup*.exe", "target/release/bundle/nsis/*setup*.exe", "target/*/release/bundle/nsis/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($NSIS_SETUP) {
-              Copy-Item $NSIS_SETUP.FullName -Destination "dist/Looker-Setup-x64.exe"
-              Copy-Item $NSIS_SETUP.FullName -Destination "dist/Looker_x64-setup.exe"
-              Write-Host "Successfully packaged NSIS installer: dist/Looker-Setup-x64.exe"
+          $NSIS = Get-ChildItem -Path "target/release/bundle/nsis/*-setup.exe", "target/release/bundle/nsis/*.exe", "crates/looker-app/target/release/bundle/nsis/*.exe" -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($NSIS) {
+            Copy-Item $NSIS.FullName -Destination "Looker-Setup-x64.exe"
+            Write-Host "Found and prepared Looker-Setup-x64.exe from $($NSIS.FullName)"
           } else {
-              Write-Warning "No NSIS setup installer found in target bundle directory!"
+            Write-Error "NSIS setup executable not found in target/release/bundle/nsis!"
+            exit 1
           }
 
-      - name: Package artifacts (Unix)
-        if: matrix.os != 'windows-latest'
-        run: |
-          TAG="${{ github.ref_name }}"
-          if [ -z "$TAG" ] || [[ "$TAG" == refs/* ]]; then TAG="nightly"; fi
-          ARCHIVE_NAME="looker-${TAG}-${{ matrix.target }}"
-          mkdir -p "dist/${ARCHIVE_NAME}"
-          cp "target/${{ matrix.target }}/release/looker-proxy" "dist/${ARCHIVE_NAME}/"
-          cp "target/${{ matrix.target }}/release/looker-down" "dist/${ARCHIVE_NAME}/"
-          cp "README.md" "dist/${ARCHIVE_NAME}/"
-          cp "AGENT.md" "dist/${ARCHIVE_NAME}/"
-          tar -czf "dist/${ARCHIVE_NAME}.tar.gz" -C dist "${ARCHIVE_NAME}"
-
-      - name: Upload artifact
+      - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
-          name: looker-${{ matrix.target }}
-          path: dist/*.*
+          name: looker-windows
+          path: Looker-Setup-x64.exe
 
-  create-release:
-    name: Create GitHub Release & Compute Checksums
-    needs: build-release
+  build-linux:
+    name: Build - Linux (x64)
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Install Tauri v2 Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf zenity
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Tauri CLI
+        uses: taiki-e/install-action@v2
+        with:
+          tool: tauri-cli
+
+      - name: Build Tauri Deb and AppImage
+        run: |
+          cd crates/looker-app
+          APPIMAGE_EXTRACT_AND_RUN=1 cargo tauri build --bundles deb,appimage
+
+      - name: Prepare Linux artifacts
+        run: |
+          APPIMAGE=$(find target/release/bundle/appimage crates/looker-app/target/release/bundle/appimage -name "*.AppImage" 2>/dev/null | head -n 1)
+          DEB=$(find target/release/bundle/deb crates/looker-app/target/release/bundle/deb -name "*.deb" 2>/dev/null | head -n 1)
+          if [ -n "$APPIMAGE" ]; then
+            cp "$APPIMAGE" Looker-Linux-x64.AppImage
+            echo "Copied $APPIMAGE to Looker-Linux-x64.AppImage"
+          else
+            echo "Error: .AppImage bundle not found!" >&2
+            exit 1
+          fi
+          if [ -n "$DEB" ]; then
+            cp "$DEB" Looker-Linux-x64.deb
+            echo "Copied $DEB to Looker-Linux-x64.deb"
+          else
+            echo "Error: .deb bundle not found!" >&2
+            exit 1
+          fi
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: looker-linux
+          path: |
+            Looker-Linux-x64.AppImage
+            Looker-Linux-x64.deb
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-windows, build-linux]
     runs-on: ubuntu-latest
     steps:
-      - name: Download all built artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
-          path: dist-all
+          path: release-artifacts
           merge-multiple: true
 
       - name: Compute SHA-256 checksums
         run: |
-          cd dist-all
-          sha256sum *.* > checksums.sha256
+          cd release-artifacts
+          sha256sum Looker-Setup-x64.exe Looker-Linux-x64.AppImage Looker-Linux-x64.deb > checksums.sha256
           cat checksums.sha256
 
-      - name: Create GitHub Release
+      - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
         if: startsWith(github.ref, 'tags/v') || github.event_name == 'workflow_dispatch'
         with:
-          files: dist-all/*
+          files: |
+            release-artifacts/Looker-Setup-x64.exe
+            release-artifacts/Looker-Linux-x64.AppImage
+            release-artifacts/Looker-Linux-x64.deb
+            release-artifacts/checksums.sha256
           generate_release_notes: true

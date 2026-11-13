@@ -20,6 +20,7 @@ settings.json
 *.bak
 
 # IDE & OS files
+.cargo/config.toml
 .idea/
 .vscode/
 .DS_Store

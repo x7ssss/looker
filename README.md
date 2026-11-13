@@ -1,21 +1,37 @@
 # Looker - Native Rust Proxy Harvester, Local Gateway & Multi-Slot MEGA Downloader
 
-> A self-contained Windows desktop app that scrapes and validates thousands of public proxies in the background and uses them to bypass MEGA transfer quota walls automatically.
+> A self-contained Windows & Linux desktop app that scrapes and validates thousands of public proxies in the background and uses them to bypass MEGA transfer quota walls automatically.
 
 [![Release](https://img.shields.io/github/v/release/x7ssss/looker?color=emerald)](https://github.com/x7ssss/looker/releases/latest)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%20(x64)-informational.svg)](https://github.com/x7ssss/looker/releases/latest)
+[![Platform: Windows & Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20(x64)-informational.svg)](https://github.com/x7ssss/looker/releases/latest)
 [![Rust: 1.80+](https://img.shields.io/badge/Rust-1.80+-orange.svg)](https://www.rust-lang.org)
 
 ---
 
 ## Installation
 
-Download the latest installer from the official release page:
+Prebuilt standalone binaries and packages for Windows and Linux (x64) are available on the official releases page:
 
-📥 **[Download Looker-Setup-x64.exe (Windows x64)](https://github.com/x7ssss/looker/releases/latest)**
+🔗 **[Download Latest Release (GitHub)](https://github.com/x7ssss/looker/releases/latest)**
 
-Looker runs as a single native binary powered by Rust and Windows WebView2. No Java Runtime Environment (JRE), Python runtime, or manual proxy list juggling required. Simply run the installer and launch Looker.
+### Windows (x64)
+- 📥 **[Looker-Setup-x64.exe](https://github.com/x7ssss/looker/releases/latest)**
+- Single native setup installer powered by Rust and Windows WebView2. No Java Runtime Environment (JRE), Python runtime, or manual proxy list juggling required. Simply run the installer and launch Looker.
+
+### Linux (x64)
+- 📥 **[Looker-Linux-x64.AppImage](https://github.com/x7ssss/looker/releases/latest)** or **[Looker-Linux-x64.deb](https://github.com/x7ssss/looker/releases/latest)**
+- Compatible with Wayland and X11 desktop environments via native XDG Desktop Portal (`xdg-portal`).
+- Requires WebKit2GTK 4.1 (`libwebkit2gtk-4.1-0`) on Debian/Ubuntu/Arch systems (`sudo apt install libwebkit2gtk-4.1-0`).
+- To run the AppImage:
+  ```bash
+  chmod +x Looker-Linux-x64.AppImage
+  ./Looker-Linux-x64.AppImage
+  ```
+- Or install the Debian package:
+  ```bash
+  sudo dpkg -i Looker-Linux-x64.deb
+  ```
 
 ---
 

@@ -2,9 +2,13 @@
 name = "looker-app"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Native desktop shell wrapping Looker daemon and UI (Tauri v2)"
+readme.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
 
 [[bin]]
 name = "looker-app"
@@ -19,6 +23,7 @@ looker-geo = { path = "../looker-geo" }
 tokio = { workspace = true, features = ["full"] }
 mimalloc = { workspace = true }
 opener = { workspace = true }
+rfd = { workspace = true, features = ["xdg-portal"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tokio-util = { workspace = true }
