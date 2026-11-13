@@ -21,6 +21,7 @@ settings.json
 
 # IDE & OS files
 .cargo/config.toml
+AGENT.md
 .idea/
 .vscode/
 .DS_Store

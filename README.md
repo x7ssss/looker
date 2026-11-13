@@ -101,6 +101,12 @@ Looker is an independent open-source network utility created for research, testi
 
 ---
 
+## Contact & Support
+
+Questions or bug reports? Open an issue on [GitHub](https://github.com/x7ssss/looker/issues) or reach out on Discord: **x7sss**.
+
+---
+
 ## License
 
-Copyright (C) 2026 x7ssss. Distributed under the [GNU General Public License v3.0](LICENSE).
+Copyright (C) 2026 x7sss. Distributed under the [GNU General Public License v3.0](LICENSE).
