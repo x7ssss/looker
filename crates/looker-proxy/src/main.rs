@@ -152,7 +152,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 timeout: Duration::from_secs(5),
                 connect_timeout: Duration::from_secs(5),
                 total_timeout: Duration::from_secs(10),
-                target_authority: "ipv4.icanhazip.com:443".to_string(),
+                target_authority: "g.api.mega.co.nz:443".to_string(),
+                verify_tls: true,
             };
             let checker = Arc::new(ProxyChecker::with_config(
                 Arc::clone(&geo_resolver),
@@ -338,7 +339,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 timeout: Duration::from_secs(5),
                 connect_timeout: Duration::from_secs(5),
                 total_timeout: Duration::from_secs(10),
-                target_authority: "ipv4.icanhazip.com:443".to_string(),
+                target_authority: "g.api.mega.co.nz:443".to_string(),
+                verify_tls: true,
             };
             let checker = ProxyChecker::with_config(geo_resolver, checker_config, direct_ip);
 

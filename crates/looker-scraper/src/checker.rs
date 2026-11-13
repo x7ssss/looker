@@ -2,10 +2,12 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rustls_pki_types::ServerName;
 use socket2::SockRef;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
+use tokio_rustls::TlsConnector;
 use tracing::{debug, info};
 
 use crate::extractor::CandidateProxy;
@@ -57,6 +59,7 @@ pub struct CheckerConfig {
     pub connect_timeout: Duration,
     pub total_timeout: Duration,
     pub target_authority: String,
+    pub verify_tls: bool,
 }
 
 impl Default for CheckerConfig {
@@ -66,9 +69,30 @@ impl Default for CheckerConfig {
             timeout: Duration::from_secs(5),
             connect_timeout: Duration::from_secs(5),
             total_timeout: Duration::from_secs(10),
-            target_authority: "ipv4.icanhazip.com:443".to_string(),
+            target_authority: "g.api.mega.co.nz:443".to_string(),
+            verify_tls: true,
         }
     }
+}
+
+impl CheckerConfig {
+    pub fn target_host(&self) -> &str {
+        if let Some((host, _port)) = self.target_authority.split_once(':') {
+            host
+        } else {
+            &self.target_authority
+        }
+    }
+}
+
+fn create_tls_connector() -> Arc<TlsConnector> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let mut root_store = rustls::RootCertStore::empty();
+    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder()
+        .with_root_certificates(root_store)
+        .with_no_client_auth();
+    Arc::new(TlsConnector::from(Arc::new(config)))
 }
 
 pub struct ProxyChecker {
@@ -76,6 +100,7 @@ pub struct ProxyChecker {
     geo_resolver: Arc<GeoResolver>,
     semaphore: Arc<Semaphore>,
     direct_ip: Option<IpAddr>,
+    tls_connector: Arc<TlsConnector>,
 }
 
 impl ProxyChecker {
@@ -89,11 +114,13 @@ impl ProxyChecker {
         direct_ip: Option<IpAddr>,
     ) -> Self {
         let sem = Arc::new(Semaphore::new(config.max_concurrency));
+        let tls_connector = create_tls_connector();
         Self {
             config,
             geo_resolver,
             semaphore: sem,
             direct_ip,
+            tls_connector,
         }
     }
 
@@ -101,7 +128,7 @@ impl ProxyChecker {
         self.direct_ip = ip;
     }
 
-    /// Validates a single candidate proxy with bounded timeout and raw socket handshake.
+    /// Validates a single candidate proxy with real HTTPS and strict certificate verification.
     pub async fn check_candidate(&self, candidate: &CandidateProxy) -> Option<CheckedProxy> {
         let _permit = self.semaphore.acquire().await.ok()?;
         let target = TargetAddr::try_from(self.config.target_authority.as_str()).ok()?;
@@ -150,56 +177,105 @@ impl ProxyChecker {
                 let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(30));
                 let _ = sock.set_tcp_keepalive(&keepalive);
 
-                let check_res = match proto {
+                let handshake_res = match proto {
                     ProxyProto::Socks5 => {
-                        tokio::time::timeout(
+                        let res = tokio::time::timeout(
                             conn_timeout,
                             handshake_socks5(&mut stream, &target),
                         )
-                        .await
-                        .map(|r| r.map(|_| AnonymityLevel::Elite))
+                        .await;
+                        match res {
+                            Ok(Ok(_)) => Some((stream, AnonymityLevel::Elite)),
+                            _ => None,
+                        }
                     }
                     ProxyProto::Socks4 => {
-                        tokio::time::timeout(
+                        let res = tokio::time::timeout(
                             conn_timeout,
                             handshake_socks4(&mut stream, &target),
                         )
-                        .await
-                        .map(|r| r.map(|_| AnonymityLevel::Elite))
+                        .await;
+                        match res {
+                            Ok(Ok(_)) => Some((stream, AnonymityLevel::Elite)),
+                            _ => None,
+                        }
                     }
                     ProxyProto::HttpConnect => {
                         let auth = self.config.target_authority.clone();
                         let dip = self.direct_ip;
-                        tokio::time::timeout(
+                        let res = tokio::time::timeout(
                             conn_timeout,
                             check_http_connect_anonymity(&mut stream, &auth, dip),
                         )
-                        .await
+                        .await;
+                        match res {
+                            Ok(Ok(anon)) => Some((stream, anon)),
+                            _ => None,
+                        }
                     }
                 };
 
-                if let Ok(Ok(anonymity)) = check_res {
-                    let latency = t0.elapsed();
-                    let exit_ip = candidate.addr.ip();
-                    let geo = self.geo_resolver.lookup(exit_ip);
-                    let geo_opt = if geo.is_empty() { None } else { Some(geo) };
+                let (stream, anonymity) = match handshake_res {
+                    Some(pair) => pair,
+                    None => return None,
+                };
 
-                    debug!(
-                        "Proxy {} verified via {} in {:?} ({})",
-                        candidate.addr, proto, latency, anonymity
-                    );
+                // Strict HTTPS/TLS Handshake Verification:
+                // Test over real HTTPS with strict rustls certificate verification against target
+                if self.config.verify_tls {
+                    let host = self.config.target_host();
+                    let server_name = match ServerName::try_from(host.to_string()) {
+                        Ok(sn) => sn,
+                        Err(_) => return None,
+                    };
 
-                    Some(CheckedProxy {
-                        addr: candidate.addr,
-                        proto,
-                        latency,
-                        exit_ip: Some(exit_ip),
-                        anonymity,
-                        geo: geo_opt,
-                    })
-                } else {
-                    None
+                    let tls_fut = async {
+                        let mut tls_stream = self.tls_connector.connect(server_name, stream).await?;
+                        let probe = format!(
+                            "GET /cs HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Looker/0.1\r\nConnection: close\r\n\r\n"
+                        );
+                        tls_stream.write_all(probe.as_bytes()).await?;
+                        tls_stream.flush().await?;
+
+                        let mut buf = [0u8; 16];
+                        let n = tls_stream.read(&mut buf).await?;
+                        if n == 0 || !buf[..n].starts_with(b"HTTP/") {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "No HTTP response returned over TLS tunnel",
+                            ));
+                        }
+                        Ok::<(), std::io::Error>(())
+                    };
+
+                    match tokio::time::timeout(conn_timeout, tls_fut).await {
+                        Ok(Ok(())) => {}
+                        _ => {
+                            // Any TLS error (UnknownIssuer, expired certificate, UnsupportedCertVersion,
+                            // or CONNECT tunnel drop) immediately rejects the proxy candidate.
+                            return None;
+                        }
+                    }
                 }
+
+                let latency = t0.elapsed();
+                let exit_ip = candidate.addr.ip();
+                let geo = self.geo_resolver.lookup(exit_ip);
+                let geo_opt = if geo.is_empty() { None } else { Some(geo) };
+
+                debug!(
+                    "Proxy {} verified via {} in {:?} ({}) over HTTPS",
+                    candidate.addr, proto, latency, anonymity
+                );
+
+                Some(CheckedProxy {
+                    addr: candidate.addr,
+                    proto,
+                    latency,
+                    exit_ip: Some(exit_ip),
+                    anonymity,
+                    geo: geo_opt,
+                })
             };
 
             if let Ok(Some(checked)) = tokio::time::timeout(total_timeout, check_fut).await {
@@ -211,8 +287,6 @@ impl ProxyChecker {
     }
 
     /// Checks all candidates with streaming insertion into the provided ProxyPool.
-    /// Surviving proxies are inserted immediately as they pass validation,
-    /// and progress counters are updated in real time.
     pub async fn check_all_streaming(
         &self,
         candidates: Vec<CandidateProxy>,
@@ -272,11 +346,12 @@ impl ProxyChecker {
             geo_resolver: Arc::clone(&self.geo_resolver),
             semaphore: Arc::clone(&self.semaphore),
             direct_ip: self.direct_ip,
+            tls_connector: Arc::clone(&self.tls_connector),
         }
     }
 }
 
-async fn check_http_connect_anonymity<S>(
+pub async fn check_http_connect_anonymity<S>(
     stream: &mut S,
     authority: &str,
     direct_ip: Option<IpAddr>,

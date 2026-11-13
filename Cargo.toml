@@ -51,6 +51,10 @@ opener = "0.7"
 tokio-util = { version = "0.7", features = ["rt"] }
 dirs = "6"
 rfd = { version = "0.15", default-features = false, features = ["tokio", "xdg-portal"] }
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+rustls-pki-types = "1.16"
+webpki-roots = "1.0"
 
 looker-protocol = { path = "crates/looker-protocol" }
 looker-geo = { path = "crates/looker-geo" }

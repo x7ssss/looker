@@ -524,6 +524,32 @@
   - Parallel native build jobs: `windows-latest` (produces `Looker-Setup-x64.exe`) and `ubuntu-22.04` (produces `Looker-Linux-x64.AppImage` and `Looker-Linux-x64.deb`).
   - Dedicated publish job computing SHA-256 checksums and publishing assets via `softprops/action-gh-release@v2`.
 
+### Phase 19: Real HTTPS Proxy Validation, Multi-Tiered Cooldowns, Atomic Chunk Scheduler, Resume Sidecar & Collision-Safe Naming
+- [x] Real HTTPS/TLS Proxy Validation (`looker-scraper`):
+  - Upgraded proxy validation target in `checker.rs` to real HTTPS with strict rustls certificate verification against `https://g.api.mega.co.nz` (`g.api.mega.co.nz:443`) using `webpki-roots`.
+  - Upstream tunnels (HTTP CONNECT, SOCKS4, SOCKS5) undergo complete TLS 1.2/1.3 handshakes; proxies with expired certs, `UnknownIssuer`, `UnsupportedCertVersion`, handshake EOF, or tunnel failures are rejected immediately so broken/MITM proxies never enter the healthy pool.
+- [x] Multi-Tiered IP & Subnet Cooldowns + Top-20 Jitter (`looker-pool`):
+  - Track failure counts and cooldowns at 3 granular levels:
+    1. Exact endpoint (`IpAddr:port`).
+    2. Host IP (`IpAddr` across all ports): if an IP fails 3 times across any of its ports, the entire IP host is placed on cooldown.
+    3. IPv4 `/24` subnet: if 5 distinct endpoint failures occur within the same `/24` prefix, that `/24` subnet enters a 15-minute cooldown.
+  - Implemented `record_failure_at_all_levels` called immediately when chunk workers hit TLS errors, handshake EOF, or TCP connect timeouts.
+  - Added Top-20 Jitter in `select(SelectionStrategy::LowestLatency)` and `get_mega_healthy_candidates_ordered`: shuffles the top 20 lowest-latency healthy proxies to eliminate millisecond worker dogpiling.
+- [x] Atomic Chunk Scheduler & Resume Sidecar (`looker-gateway`):
+  - Implemented `ChunkScheduler` with atomic chunk acquisition: marks chunks `InFlight` inside a single lock acquisition (`acquire_next_chunk(worker_id)`), preventing concurrent duplicate assignments.
+  - Preserved completed chunks via `.looker-resume` JSON sidecar files alongside target partial files; resumed downloads reload completed chunk indices and only download incomplete chunks.
+  - Successfully cleans up `.looker-resume` sidecars after download finishes and CBC-MAC integrity verification passes.
+  - Stopped storage URL hammering on proxy connection/TLS errors: URLs are refreshed ONLY on HTTP 403, 410, or 509. Added `refresh_storage_url_debounced` to deduplicate concurrent 403/410/509 API calls across workers.
+  - Clean task deletion: aborts in-flight HTTP chunk futures via `CancellationToken`, closes file handles, and removes `.part`, incomplete files, and `.looker-resume`.
+- [x] Collision-Safe Naming & Remembered Download Folder (`looker-gateway` & UI):
+  - Implemented `resolve_unique_path`: automatically generates non-colliding paths (`photo (1).jpg`, `Album (1)`) when target files or folders already exist and do not possess a matching `.looker-resume` sidecar.
+  - Sub-items in folder downloads nest properly into resolved unique directories.
+  - Added `last_used_download_dir: Option<String>` to `AppSettings` in `settings.json`; updated when users provide custom download directories.
+  - Updated Inspector modal UI to pre-fill Destination from `last_used_download_dir` and added a "Reset to Default" button next to "Browse...".
+- [x] Full Workspace Verification:
+  - 48 tests pass cleanly across all crates (including `test_ip_and_subnet_cooldowns`, `test_atomic_chunk_scheduler_never_duplicates`, `test_collision_safe_unique_path_generation`).
+  - Production release build `cargo build --release -p looker-app` compiles and links cleanly.
+
 ---
 
 ## 5. Session Instructions for Future Agents

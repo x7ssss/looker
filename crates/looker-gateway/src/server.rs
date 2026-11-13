@@ -757,9 +757,13 @@ async fn handle_client(
 
     // Route 5e: System Default Download Directory API (GET /api/system/default-dir)
     if method.eq_ignore_ascii_case("GET") && req_path == "/api/system/default-dir" {
-        let base_dir = crate::resolve_default_download_dir();
+        let default_dir = crate::resolve_default_download_dir();
+        let last_used = download_mgr.get_last_used_download_dir().await;
+        let base_dir = last_used.clone().unwrap_or_else(|| default_dir.to_string_lossy().to_string());
         let json = serde_json::json!({
-            "base_dir": base_dir.to_string_lossy().to_string()
+            "base_dir": base_dir,
+            "default_dir": default_dir.to_string_lossy().to_string(),
+            "last_used_dir": last_used,
         }).to_string();
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

@@ -1,7 +1,8 @@
-use std::net::SocketAddr;
+use std::collections::{HashMap, HashSet};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use rand::Rng;
@@ -67,6 +68,12 @@ pub struct ProxyPool {
     checked_count: AtomicUsize,
     working_count: AtomicUsize,
     is_scraping: std::sync::atomic::AtomicBool,
+
+    // Three-tier failure tracking and cooldowns:
+    host_failures: RwLock<HashMap<IpAddr, u32>>,
+    host_cooldowns: RwLock<HashMap<IpAddr, Instant>>,
+    subnet_failures: RwLock<HashMap<[u8; 3], HashSet<SocketAddr>>>,
+    subnet_cooldowns: RwLock<HashMap<[u8; 3], Instant>>,
 }
 
 impl Default for ProxyPool {
@@ -86,6 +93,10 @@ impl ProxyPool {
             checked_count: AtomicUsize::new(0),
             working_count: AtomicUsize::new(0),
             is_scraping: std::sync::atomic::AtomicBool::new(false),
+            host_failures: RwLock::new(HashMap::new()),
+            host_cooldowns: RwLock::new(HashMap::new()),
+            subnet_failures: RwLock::new(HashMap::new()),
+            subnet_cooldowns: RwLock::new(HashMap::new()),
         }
     }
 
@@ -168,15 +179,29 @@ impl ProxyPool {
                 Ok(Arc::clone(healthy[idx]))
             }
             SelectionStrategy::LowestLatency => {
-                let best = healthy.iter().min_by_key(|i| {
+                let non_cooldown: Vec<&Arc<ProxyItem>> = healthy
+                    .iter()
+                    .filter(|i| !self.is_ip_or_subnet_cooldown(i.addr))
+                    .copied()
+                    .collect();
+                let pool_to_use = if non_cooldown.is_empty() {
+                    healthy
+                } else {
+                    non_cooldown
+                };
+                let mut sorted = pool_to_use;
+                sorted.sort_by_key(|i| {
                     let ms = i.latency_ms.load(Ordering::Relaxed);
                     if ms == 0 {
-                        u64::MAX
+                        99999
                     } else {
                         ms
                     }
                 });
-                Ok(Arc::clone(best.unwrap()))
+                let top_window = sorted.len().min(20);
+                let mut rng = rand::thread_rng();
+                let idx = rng.gen_range(0..top_window);
+                Ok(Arc::clone(sorted[idx]))
             }
             SelectionStrategy::Random => {
                 let mut rng = rand::thread_rng();
@@ -214,16 +239,19 @@ impl ProxyPool {
         let items = self.items.read();
         let mut mega_healthy: Vec<Arc<ProxyItem>> = items
             .iter()
-            .filter(|i| i.is_healthy() && !i.is_mega_cooldown())
+            .filter(|i| i.is_healthy() && !i.is_mega_cooldown() && !self.is_ip_or_subnet_cooldown(i.addr))
             .map(Arc::clone)
             .collect();
 
         if mega_healthy.is_empty() {
             let mut fallback: Vec<Arc<ProxyItem>> = items
                 .iter()
-                .filter(|i| i.is_healthy())
+                .filter(|i| i.is_healthy() && !self.is_ip_or_subnet_cooldown(i.addr))
                 .map(Arc::clone)
                 .collect();
+            if fallback.is_empty() {
+                fallback = items.iter().filter(|i| i.is_healthy()).map(Arc::clone).collect();
+            }
             if order.eq_ignore_ascii_case("random") {
                 use rand::seq::SliceRandom;
                 let mut rng = rand::thread_rng();
@@ -237,6 +265,12 @@ impl ProxyPool {
                         ms
                     }
                 });
+                let top_window = fallback.len().min(20);
+                if top_window > 1 {
+                    use rand::seq::SliceRandom;
+                    let mut rng = rand::thread_rng();
+                    fallback[..top_window].shuffle(&mut rng);
+                }
             }
             fallback.truncate(max_candidates);
             return fallback;
@@ -255,6 +289,13 @@ impl ProxyPool {
                     ms
                 }
             });
+            // Top-20 Jitter in fastest first / sequential mode to prevent dogpiling
+            let top_window = mega_healthy.len().min(20);
+            if top_window > 1 {
+                use rand::seq::SliceRandom;
+                let mut rng = rand::thread_rng();
+                mega_healthy[..top_window].shuffle(&mut rng);
+            }
         }
 
         mega_healthy.truncate(max_candidates);
@@ -266,13 +307,105 @@ impl ProxyPool {
         self.get_mega_healthy_candidates_ordered(max_candidates, "sequential")
     }
 
-    /// Marks a proxy identified by address on MEGA 509 quota cooldown.
-    /// Does not increment failure strikes or trip the circuit breaker.
-    pub fn mark_mega_cooldown(&self, addr: SocketAddr, cooldown: Duration) {
-        let items = self.items.read();
-        if let Some(item) = items.iter().find(|i| i.addr == addr) {
-            item.mark_mega_509_cooldown(cooldown);
+    /// Checks if a socket address is blocked by an active host IP cooldown or /24 subnet cooldown.
+    pub fn is_ip_or_subnet_cooldown(&self, addr: SocketAddr) -> bool {
+        let now = Instant::now();
+        {
+            let hc = self.host_cooldowns.read();
+            if let Some(&until) = hc.get(&addr.ip()) {
+                if now < until {
+                    return true;
+                }
+            }
         }
+        if let IpAddr::V4(v4) = addr.ip() {
+            let oct = v4.octets();
+            let subnet = [oct[0], oct[1], oct[2]];
+            let sc = self.subnet_cooldowns.read();
+            if let Some(&until) = sc.get(&subnet) {
+                if now < until {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Returns whether the host IP is on active host cooldown.
+    pub fn is_host_ip_cooldown(&self, ip: IpAddr) -> bool {
+        let hc = self.host_cooldowns.read();
+        if let Some(&until) = hc.get(&ip) {
+            Instant::now() < until
+        } else {
+            false
+        }
+    }
+
+    /// Returns whether the /24 subnet is on active subnet cooldown.
+    pub fn is_subnet_cooldown(&self, subnet: [u8; 3]) -> bool {
+        let sc = self.subnet_cooldowns.read();
+        if let Some(&until) = sc.get(&subnet) {
+            Instant::now() < until
+        } else {
+            false
+        }
+    }
+
+    /// Records failure and updates cooldowns at three levels:
+    /// 1. Exact endpoint (addr)
+    /// 2. Host IP: if an IP fails 3 times across any of its ports, puts the entire IP on cooldown
+    /// 3. /24 subnet: if 5 distinct failures occur from the same /24 subnet, puts the prefix on a 15-minute cooldown
+    pub fn record_failure_at_all_levels(&self, addr: SocketAddr, cooldown: Duration) {
+        // 1. Exact endpoint cooldown
+        {
+            let items = self.items.read();
+            if let Some(item) = items.iter().find(|i| i.addr == addr) {
+                item.mark_mega_509_cooldown(cooldown);
+                let (_quarantined, total) = item.record_failure(cooldown);
+                let proto = item.proto;
+                if total >= 3 {
+                    drop(items);
+                    self.remove_item(addr, proto);
+                }
+            }
+        }
+
+        // 2. Host IP failure tracking
+        let ip = addr.ip();
+        let ip_failures = {
+            let mut hf = self.host_failures.write();
+            let count = hf.entry(ip).or_insert(0);
+            *count += 1;
+            *count
+        };
+
+        if ip_failures >= 3 {
+            let mut hc = self.host_cooldowns.write();
+            hc.insert(ip, Instant::now() + cooldown);
+        }
+
+        // 3. /24 subnet failure tracking
+        if let IpAddr::V4(v4) = ip {
+            let oct = v4.octets();
+            let subnet = [oct[0], oct[1], oct[2]];
+            let distinct_failures = {
+                let mut sf = self.subnet_failures.write();
+                let set = sf.entry(subnet).or_default();
+                set.insert(addr);
+                set.len()
+            };
+
+            if distinct_failures >= 5 {
+                let mut sc = self.subnet_cooldowns.write();
+                // 15-minute cooldown on the /24 subnet
+                sc.insert(subnet, Instant::now() + Duration::from_secs(15 * 60));
+            }
+        }
+    }
+
+    /// Marks a proxy identified by address on MEGA 509 quota cooldown or connection drop.
+    pub fn mark_mega_cooldown(&self, addr: SocketAddr, cooldown: Duration) {
+        self.record_failure_at_all_levels(addr, cooldown);
     }
 
     /// Returns count of proxies currently on active MEGA 509 cooldown.
@@ -416,26 +549,11 @@ impl ProxyPool {
     }
 
     pub fn record_failure(&self, item: &ProxyItem) {
-        let (_quarantined, total) = item.record_failure(self.default_cooldown);
-        if total >= 3 {
-            self.remove_item(item.addr, item.proto);
-        }
+        self.record_failure_at_all_levels(item.addr, self.default_cooldown);
     }
 
-    pub fn record_failure_by_addr(&self, addr: SocketAddr, proto: ProxyProto) {
-        let should_remove = {
-            let items = self.items.read();
-            if let Some(item) = items.iter().find(|i| i.addr == addr && i.proto == proto) {
-                let (_quarantined, total) = item.record_failure(self.default_cooldown);
-                total >= 3
-            } else {
-                false
-            }
-        };
-
-        if should_remove {
-            self.remove_item(addr, proto);
-        }
+    pub fn record_failure_by_addr(&self, addr: SocketAddr, _proto: ProxyProto) {
+        self.record_failure_at_all_levels(addr, self.default_cooldown);
     }
 
     pub fn record_success(&self, item: &ProxyItem, latency: Duration) {
@@ -880,5 +998,65 @@ mod tests {
         let rnd = pool.get_mega_healthy_candidates_ordered(10, "random");
         assert_eq!(rnd.len(), 1);
         assert_eq!(rnd[0].addr, addr2);
+    }
+
+    #[test]
+    fn test_ip_and_subnet_cooldowns() {
+        let pool = ProxyPool::new();
+
+        // 1. Host IP failure tracking: 3 failures across different ports put entire IP on cooldown
+        let host_ip: IpAddr = "144.124.251.24".parse().unwrap();
+        let port1: SocketAddr = "144.124.251.24:10154".parse().unwrap();
+        let port2: SocketAddr = "144.124.251.24:10749".parse().unwrap();
+        let port3: SocketAddr = "144.124.251.24:11124".parse().unwrap();
+
+        pool.add(port1, ProxyProto::HttpConnect, None);
+        pool.add(port2, ProxyProto::HttpConnect, None);
+        pool.add(port3, ProxyProto::HttpConnect, None);
+
+        assert!(!pool.is_host_ip_cooldown(host_ip));
+        assert!(!pool.is_ip_or_subnet_cooldown(port3));
+
+        // 2 failures on port 1
+        pool.record_failure_at_all_levels(port1, Duration::from_secs(300));
+        pool.record_failure_at_all_levels(port1, Duration::from_secs(300));
+        assert!(!pool.is_host_ip_cooldown(host_ip));
+
+        // 1 failure on port 2 -> total 3 failures for host 144.124.251.24
+        pool.record_failure_at_all_levels(port2, Duration::from_secs(300));
+        assert!(pool.is_host_ip_cooldown(host_ip));
+        // Port 3 should now be blocked by host-level cooldown!
+        assert!(pool.is_ip_or_subnet_cooldown(port3));
+
+        // 2. IPv4 /24 Subnet failure tracking: 5 distinct failures put the /24 prefix on 15m cooldown
+        let subnet = [145, 220, 227];
+        let ep1: SocketAddr = "145.220.227.1:8080".parse().unwrap();
+        let ep2: SocketAddr = "145.220.227.2:8080".parse().unwrap();
+        let ep3: SocketAddr = "145.220.227.3:8080".parse().unwrap();
+        let ep4: SocketAddr = "145.220.227.4:8080".parse().unwrap();
+        let ep5: SocketAddr = "145.220.227.5:8080".parse().unwrap();
+        let ep6: SocketAddr = "145.220.227.6:8080".parse().unwrap();
+
+        pool.add(ep1, ProxyProto::Socks5, None);
+        pool.add(ep2, ProxyProto::Socks5, None);
+        pool.add(ep3, ProxyProto::Socks5, None);
+        pool.add(ep4, ProxyProto::Socks5, None);
+        pool.add(ep5, ProxyProto::Socks5, None);
+        pool.add(ep6, ProxyProto::Socks5, None);
+
+        assert!(!pool.is_subnet_cooldown(subnet));
+        assert!(!pool.is_ip_or_subnet_cooldown(ep6));
+
+        pool.record_failure_at_all_levels(ep1, Duration::from_secs(60));
+        pool.record_failure_at_all_levels(ep2, Duration::from_secs(60));
+        pool.record_failure_at_all_levels(ep3, Duration::from_secs(60));
+        pool.record_failure_at_all_levels(ep4, Duration::from_secs(60));
+        assert!(!pool.is_subnet_cooldown(subnet));
+
+        // 5th distinct failure from the same /24 subnet
+        pool.record_failure_at_all_levels(ep5, Duration::from_secs(60));
+        assert!(pool.is_subnet_cooldown(subnet));
+        // ep6 in the same subnet is now blocked by subnet-level cooldown!
+        assert!(pool.is_ip_or_subnet_cooldown(ep6));
     }
 }

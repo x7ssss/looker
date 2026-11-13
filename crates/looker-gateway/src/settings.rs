@@ -58,6 +58,9 @@ pub struct AppSettings {
 
     #[serde(default)]
     pub cmd_on_all_finished: Option<String>,
+
+    #[serde(default)]
+    pub last_used_download_dir: Option<String>,
 }
 
 fn default_download_dir() -> String {
@@ -117,6 +120,7 @@ impl Default for AppSettings {
             upstream_proxy: None,
             cmd_on_509_limit: None,
             cmd_on_all_finished: None,
+            last_used_download_dir: None,
         }
     }
 }

@@ -19,3 +19,7 @@ socket2 = { workspace = true }
 looker-protocol = { workspace = true }
 looker-geo = { workspace = true }
 looker-pool = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+webpki-roots = { workspace = true }

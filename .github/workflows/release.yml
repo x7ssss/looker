@@ -121,6 +121,17 @@ jobs:
           path: release-artifacts
           merge-multiple: true
 
+      - name: Verify release artifacts exist and are non-empty
+        run: |
+          cd release-artifacts
+          for file in Looker-Setup-x64.exe Looker-Linux-x64.AppImage Looker-Linux-x64.deb; do
+            if [ ! -s "$file" ]; then
+              echo "Error: $file does not exist or is empty!" >&2
+              exit 1
+            fi
+            echo "Verified $file ($(stat -c%s "$file") bytes)"
+          done
+
       - name: Compute SHA-256 checksums
         run: |
           cd release-artifacts
@@ -129,11 +140,14 @@ jobs:
 
       - name: Publish to GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'tags/v') || github.event_name == 'workflow_dispatch'
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         with:
           files: |
             release-artifacts/Looker-Setup-x64.exe
             release-artifacts/Looker-Linux-x64.AppImage
             release-artifacts/Looker-Linux-x64.deb
             release-artifacts/checksums.sha256
+          draft: false
+          prerelease: false
+          fail_on_unmatched_files: true
           generate_release_notes: true

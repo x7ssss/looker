@@ -93,6 +93,230 @@ pub fn check_available_disk_space(target_path: &Path, needed_bytes: u64) -> Resu
 }
 
 // ============================================================
+// RESUME STATE & BITMAP PERSISTENCE (.looker-resume)
+// ============================================================
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeState {
+    pub file_handle: String,
+    pub total_size: u64,
+    pub completed_chunk_indices: Vec<usize>,
+    pub updated_at_epoch_secs: u64,
+}
+
+pub fn resume_file_path(target_path: &Path) -> PathBuf {
+    PathBuf::from(format!("{}.looker-resume", target_path.display()))
+}
+
+pub fn load_resume_state(target_path: &Path, file_handle: &str, file_size: u64) -> Option<HashSet<usize>> {
+    let p = resume_file_path(target_path);
+    if p.exists() {
+        if let Ok(content) = std::fs::read_to_string(&p) {
+            if let Ok(state) = serde_json::from_str::<ResumeState>(&content) {
+                if state.file_handle == file_handle && state.total_size == file_size {
+                    return Some(state.completed_chunk_indices.into_iter().collect());
+                }
+            }
+        }
+    }
+    None
+}
+
+pub fn save_resume_state(target_path: &Path, file_handle: &str, file_size: u64, completed: &[usize]) {
+    let p = resume_file_path(target_path);
+    let state = ResumeState {
+        file_handle: file_handle.to_string(),
+        total_size: file_size,
+        completed_chunk_indices: completed.to_vec(),
+        updated_at_epoch_secs: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+    if let Ok(json) = serde_json::to_string(&state) {
+        let _ = std::fs::write(p, json);
+    }
+}
+
+pub fn remove_resume_state(target_path: &Path) {
+    let p = resume_file_path(target_path);
+    let _ = std::fs::remove_file(p);
+}
+
+// ============================================================
+// COLLISION-SAFE PATH GENERATION (Never Overwrite Files/Folders)
+// ============================================================
+
+pub fn resolve_unique_path(
+    base_dir: &Path,
+    name: &str,
+    is_dir: bool,
+    file_handle: Option<&str>,
+    file_size: Option<u64>,
+) -> PathBuf {
+    let initial_path = base_dir.join(name);
+
+    // If an existing file has an active matching .looker-resume file, resume it!
+    if let (Some(handle), Some(size)) = (file_handle, file_size) {
+        if initial_path.exists() && load_resume_state(&initial_path, handle, size).is_some() {
+            return initial_path;
+        }
+    }
+
+    if !initial_path.exists() {
+        return initial_path;
+    }
+
+    if is_dir {
+        let mut counter = 1;
+        loop {
+            let candidate_name = format!("{} ({})", name, counter);
+            let candidate_path = base_dir.join(&candidate_name);
+            if !candidate_path.exists() {
+                return candidate_path;
+            }
+            counter += 1;
+        }
+    } else {
+        let path_obj = Path::new(name);
+        let stem = path_obj.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+        let extension = path_obj.extension().and_then(|e| e.to_str());
+
+        let mut counter = 1;
+        loop {
+            let candidate_name = match extension {
+                Some(ext) => format!("{} ({}).{}", stem, counter, ext),
+                None => format!("{} ({})", stem, counter),
+            };
+            let candidate_path = base_dir.join(&candidate_name);
+            if let (Some(handle), Some(size)) = (file_handle, file_size) {
+                if candidate_path.exists() && load_resume_state(&candidate_path, handle, size).is_some() {
+                    return candidate_path;
+                }
+            }
+            if !candidate_path.exists() {
+                return candidate_path;
+            }
+            counter += 1;
+        }
+    }
+}
+
+// ============================================================
+// ATOMIC CHUNK SCHEDULER (Duplicate-Free Work Distribution)
+// ============================================================
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChunkStatus {
+    Pending,
+    InFlight { worker_id: usize, attempt: usize },
+    Completed,
+    Failed,
+}
+
+#[derive(Debug)]
+pub struct ChunkScheduler {
+    chunks: Vec<ChunkInfo>,
+    statuses: Vec<ChunkStatus>,
+    completed_count: usize,
+    total_size: u64,
+}
+
+impl ChunkScheduler {
+    pub fn new(chunks: Vec<ChunkInfo>, file_size: u64, already_completed: &HashSet<usize>) -> Self {
+        let total = chunks.len();
+        let mut statuses = vec![ChunkStatus::Pending; total];
+        let mut completed_count = 0;
+
+        for &idx in already_completed {
+            if idx < total {
+                statuses[idx] = ChunkStatus::Completed;
+                completed_count += 1;
+            }
+        }
+
+        Self {
+            chunks,
+            statuses,
+            completed_count,
+            total_size: file_size,
+        }
+    }
+
+    /// Atomically acquires the next pending chunk and marks it InFlight in a single lock acquisition.
+    /// Guarantees that two workers can NEVER be assigned the same chunk concurrently!
+    pub fn acquire_next_chunk(&mut self, worker_id: usize) -> Option<(ChunkInfo, usize)> {
+        for (idx, status) in self.statuses.iter_mut().enumerate() {
+            if *status == ChunkStatus::Pending {
+                *status = ChunkStatus::InFlight { worker_id, attempt: 0 };
+                return Some((self.chunks[idx], 0));
+            }
+        }
+        None
+    }
+
+    /// Marks a chunk completed and increments the completion count.
+    pub fn mark_completed(&mut self, index: usize) {
+        if index < self.statuses.len() {
+            if self.statuses[index] != ChunkStatus::Completed {
+                self.statuses[index] = ChunkStatus::Completed;
+                self.completed_count += 1;
+            }
+        }
+    }
+
+    /// Marks a chunk for retry or marks it failed if max retries exceeded.
+    pub fn mark_retry(&mut self, index: usize, max_retries: usize) -> Result<usize, ()> {
+        if index < self.statuses.len() {
+            let attempt = match self.statuses[index] {
+                ChunkStatus::InFlight { attempt, .. } => attempt + 1,
+                _ => 1,
+            };
+            if attempt < max_retries {
+                self.statuses[index] = ChunkStatus::Pending;
+                Ok(attempt)
+            } else {
+                self.statuses[index] = ChunkStatus::Failed;
+                Err(())
+            }
+        } else {
+            Err(())
+        }
+    }
+
+    pub fn completed_count(&self) -> usize {
+        self.completed_count
+    }
+
+    pub fn total_size(&self) -> u64 {
+        self.total_size
+    }
+
+    pub fn total_chunks(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn is_all_completed(&self) -> bool {
+        self.completed_count >= self.chunks.len()
+    }
+
+    pub fn active_in_flight(&self) -> usize {
+        self.statuses
+            .iter()
+            .filter(|s| matches!(s, ChunkStatus::InFlight { .. }))
+            .count()
+    }
+
+    pub fn completed_indices(&self) -> Vec<usize> {
+        self.statuses
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| if *s == ChunkStatus::Completed { Some(i) } else { None })
+            .collect()
+    }
+}
+
+// ============================================================
 // RATE LIMITER & LIVE CONFIG
 // ============================================================
 
@@ -581,6 +805,12 @@ impl DownloadManager {
         self.settings.read().await.clone()
     }
 
+    /// Gets the last used download directory if configured.
+    pub async fn get_last_used_download_dir(&self) -> Option<String> {
+        let s = self.settings.read().await;
+        s.last_used_download_dir.clone()
+    }
+
     /// Updates application settings, enforces constraints, persists to disk, and applies rate limit.
     pub async fn update_settings(&self, mut new_settings: AppSettings) -> AppSettings {
         new_settings.sanitize();
@@ -730,11 +960,19 @@ impl DownloadManager {
         let task_id = format!("task-{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let cancel_token = CancellationToken::new();
 
-        let s = self.settings.read().await.clone();
-
-        if req.output_dir.trim().is_empty() || req.output_dir == "./downloads" {
-            req.output_dir = s.default_download_dir.clone();
-        }
+        let s = {
+            let mut settings_guard = self.settings.write().await;
+            if req.output_dir.trim().is_empty() || req.output_dir == "./downloads" {
+                req.output_dir = settings_guard
+                    .last_used_download_dir
+                    .clone()
+                    .unwrap_or_else(|| settings_guard.default_download_dir.clone());
+            } else {
+                settings_guard.last_used_download_dir = Some(req.output_dir.clone());
+                let _ = settings_guard.save_async().await;
+            }
+            settings_guard.clone()
+        };
 
         let out_path = PathBuf::from(&req.output_dir);
         tokio::fs::create_dir_all(&out_path)
@@ -1007,15 +1245,35 @@ impl DownloadManager {
     }
 
     /// Removes a finished or cancelled download task from memory and queue.json.
+    /// Aborts in-flight workers immediately and cleans up incomplete .part files and resume sidecars.
     pub async fn delete_task(&self, id: &str) -> bool {
-        let token_opt = {
+        let (token_opt, output_path, status) = {
             let mut tasks = self.tasks.write().await;
-            tasks.remove(id).map(|a| a.cancel_token.clone())
+            if let Some(active) = tasks.remove(id) {
+                let info = active.info.read().await.clone();
+                (Some(active.cancel_token.clone()), info.output_path, info.status)
+            } else {
+                (None, String::new(), TaskStatus::Cancelled)
+            }
         };
 
         if let Some(token) = token_opt {
             token.cancel();
             self.save_queue().await;
+
+            // If task was not completed, clean up .part files, .looker-resume, and incomplete files
+            if status != TaskStatus::Completed && !output_path.is_empty() {
+                let path = PathBuf::from(&output_path);
+                let resume_p = resume_file_path(&path);
+                let _ = tokio::fs::remove_file(&resume_p).await;
+
+                let part_path = PathBuf::from(format!("{}.part", output_path));
+                let _ = tokio::fs::remove_file(&part_path).await;
+
+                if path.is_file() {
+                    let _ = tokio::fs::remove_file(&path).await;
+                }
+            }
             true
         } else {
             false
@@ -1080,13 +1338,6 @@ async fn build_http_client(gateway_addr: &str, watchdog_seconds: u64) -> Client 
         .timeout(CHUNK_TIMEOUT)
         .build()
         .unwrap_or_default()
-}
-
-#[derive(Debug, Clone)]
-struct ChunkTask {
-    info: ChunkInfo,
-    file_handle: String,
-    attempt: usize,
 }
 
 async fn run_download_task(
@@ -1158,7 +1409,12 @@ async fn run_download_task(
             })
             .unwrap_or_else(|| format!("Folder_{}", link.handle));
 
-        let folder_dest = base_out.join(&folder_title);
+        let current_out = task_info.read().await.output_path.clone();
+        let folder_dest = if !current_out.is_empty() && current_out != req.output_dir && Path::new(&current_out).exists() {
+            PathBuf::from(current_out)
+        } else {
+            resolve_unique_path(&base_out, &folder_title, true, Some(&link.handle), None)
+        };
         tokio::fs::create_dir_all(&folder_dest)
             .await
             .map_err(|e| format!("Failed to create folder {}: {}", folder_dest.display(), e))?;
@@ -1289,7 +1545,12 @@ async fn run_download_task(
             .await
             .map_err(|e| format!("Failed to resolve file: {}", e))?;
 
-        let target_path = base_out.join(&meta.name);
+        let current_out = task_info.read().await.output_path.clone();
+        let target_path = if !current_out.is_empty() && current_out != req.output_dir && Path::new(&current_out).exists() {
+            PathBuf::from(current_out)
+        } else {
+            resolve_unique_path(&base_out, &meta.name, false, Some(&meta.handle), Some(meta.size))
+        };
 
         // INVARIANT: Disk Space Pre-Check
         check_available_disk_space(&target_path, meta.size)?;
@@ -1341,6 +1602,32 @@ async fn run_download_task(
 enum ChunkResult {
     Success { index: usize, size: u64, proxy: String },
     Failed { index: usize, error: String },
+}
+
+async fn refresh_storage_url_debounced(
+    current_storage_url: &Arc<RwLock<String>>,
+    refresh_lock: &Arc<tokio::sync::Mutex<Instant>>,
+    mega_client: &Arc<MegaClient>,
+    folder_handle_opt: Option<&str>,
+    file_handle: &str,
+    seen_url: &str,
+) -> Result<String, String> {
+    let mut last_refreshed = refresh_lock.lock().await;
+    let curr = current_storage_url.read().await.clone();
+    if curr != seen_url && !curr.is_empty() {
+        return Ok(curr);
+    }
+    if last_refreshed.elapsed() < Duration::from_secs(3) && !curr.is_empty() {
+        return Ok(curr);
+    }
+    match mega_client.refresh_file_download_url(folder_handle_opt, file_handle).await {
+        Ok(new_url) => {
+            *current_storage_url.write().await = new_url.clone();
+            *last_refreshed = Instant::now();
+            Ok(new_url)
+        }
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 pub async fn download_single_file(
@@ -1437,40 +1724,41 @@ pub async fn download_single_file(
             .map_err(|e| format!("Async open failed: {}", e))?,
     ));
 
-    let already_done = {
+    let mut already_done = {
         let guard = completed_chunks_map.read().await;
         guard.get(file_handle).cloned().unwrap_or_default()
     };
 
-    let remaining_chunks: Vec<ChunkInfo> = all_chunks
-        .into_iter()
-        .filter(|c| !already_done.contains(&c.index))
-        .collect();
+    if let Some(disk_completed) = load_resume_state(out_path, file_handle, file_size) {
+        for idx in disk_completed {
+            already_done.insert(idx);
+        }
+    }
+    {
+        let mut map = completed_chunks_map.write().await;
+        map.insert(file_handle.to_string(), already_done.clone());
+    }
 
-    let mut completed_chunks_count = already_done.len();
+    let scheduler = Arc::new(parking_lot::Mutex::new(ChunkScheduler::new(
+        all_chunks.clone(),
+        file_size,
+        &already_done,
+    )));
+    let chunk_notify = Arc::new(tokio::sync::Notify::new());
+
+    let mut completed_chunks_count = scheduler.lock().completed_count();
 
     if completed_chunks_count < total_chunks {
-        let (work_tx, work_rx) = mpsc::channel::<ChunkTask>(remaining_chunks.len() + 32);
-        for chunk in &remaining_chunks {
-            let _ = work_tx
-                .send(ChunkTask {
-                    info: *chunk,
-                    file_handle: file_handle.to_string(),
-                    attempt: 0,
-                })
-                .await;
-        }
-
         let (result_tx, mut result_rx) = mpsc::channel::<ChunkResult>(total_chunks + 32);
-        let work_rx = Arc::new(Mutex::new(work_rx));
         let file_cancel = cancel_token.child_token();
 
-        let concurrency = concurrency_limit.min(remaining_chunks.len()).max(1);
+        let remaining = total_chunks.saturating_sub(completed_chunks_count);
+        let concurrency = concurrency_limit.min(remaining).max(1);
         let mut handles = Vec::with_capacity(concurrency);
         let active_workers = Arc::new(AtomicUsize::new(0));
 
         let current_storage_url = Arc::new(RwLock::new(storage_url.to_string()));
-        let consecutive_errors = Arc::new(AtomicUsize::new(0));
+        let refresh_lock = Arc::new(tokio::sync::Mutex::new(Instant::now()));
         let last_bytes_time = Arc::new(parking_lot::Mutex::new(Instant::now()));
 
         // Automatic Live Speed Decay Monitor (cleanly decays to 0.0 MB/s within 2 seconds of inactivity)
@@ -1505,9 +1793,9 @@ pub async fn download_single_file(
                 let mut info = decay_task_info.write().await;
                 if info.status == TaskStatus::Downloading {
                     info.speed_mbps = speed_mbps;
-                    let remaining = grand_total_bytes.saturating_sub(curr_bytes);
+                    let remaining_b = grand_total_bytes.saturating_sub(curr_bytes);
                     info.eta_seconds = if speed_mbps > 0.05 {
-                        (remaining as f64 / (speed_mbps * 1024.0 * 1024.0)) as u64
+                        (remaining_b as f64 / (speed_mbps * 1024.0 * 1024.0)) as u64
                     } else {
                         0
                     };
@@ -1515,19 +1803,20 @@ pub async fn download_single_file(
             }
         });
 
-        for _ in 0..concurrency {
-            let work_rx = Arc::clone(&work_rx);
-            let work_tx = work_tx.clone();
+        for worker_id in 0..concurrency {
+            let scheduler = Arc::clone(&scheduler);
+            let chunk_notify = Arc::clone(&chunk_notify);
             let result_tx = result_tx.clone();
             let direct_http = Arc::clone(&direct_http);
             let gw_http = Arc::clone(&gw_http);
             let pool = Arc::clone(&pool);
             let current_storage_url = Arc::clone(&current_storage_url);
-            let consecutive_errors = Arc::clone(&consecutive_errors);
+            let refresh_lock = Arc::clone(&refresh_lock);
             let last_bytes_time = Arc::clone(&last_bytes_time);
             let mega_client = Arc::clone(&mega_client);
             let folder_handle_opt = folder_handle.map(|s| s.to_string());
             let file_name_str = file_name.to_string();
+            let file_handle_str = file_handle.to_string();
             let file = Arc::clone(&shared_file);
             let task_info = Arc::clone(&task_info);
             let using_proxies = Arc::clone(&using_proxies);
@@ -1540,19 +1829,44 @@ pub async fn download_single_file(
             handles.push(tokio::spawn(async move {
                 let mut cached_client: Option<(Arc<Client>, Option<Arc<ProxyItem>>, String)> = None;
 
-                loop {
+                'worker_loop: loop {
                     if cancel.is_cancelled() {
                         break;
                     }
 
-                    let task = tokio::select! {
-                        _ = cancel.cancelled() => break,
-                        t = async {
-                            let mut lock = work_rx.lock().await;
-                            lock.recv().await
-                        } => match t {
-                            Some(item) => item,
-                            None => break,
+                    let (chunk, attempt) = loop {
+                        if cancel.is_cancelled() {
+                            break 'worker_loop;
+                        }
+
+                        enum AcquireAction {
+                            Found(ChunkInfo, usize),
+                            Wait,
+                            Done,
+                        }
+
+                        let action = {
+                            let mut sched = scheduler.lock();
+                            if sched.is_all_completed() {
+                                AcquireAction::Done
+                            } else if let Some((c, att)) = sched.acquire_next_chunk(worker_id) {
+                                AcquireAction::Found(c, att)
+                            } else if sched.active_in_flight() == 0 {
+                                AcquireAction::Done
+                            } else {
+                                AcquireAction::Wait
+                            }
+                        };
+
+                        match action {
+                            AcquireAction::Done => break 'worker_loop,
+                            AcquireAction::Found(c, att) => break (c, att),
+                            AcquireAction::Wait => {
+                                tokio::select! {
+                                    _ = cancel.cancelled() => break 'worker_loop,
+                                    _ = chunk_notify.notified() => continue,
+                                }
+                            }
                         }
                     };
 
@@ -1562,7 +1876,6 @@ pub async fn download_single_file(
                         info.active_workers = active_workers.load(Ordering::Relaxed);
                     }
 
-                    let chunk = task.info;
                     let s = settings.read().await.clone();
 
                     // Sticky 509 check: while elapsed < sticky_509_seconds, route directly through proxies
@@ -1587,7 +1900,7 @@ pub async fn download_single_file(
                         let (cli, cand, addr) = cached_client.as_ref().unwrap();
                         (Arc::clone(cli), cand.as_ref().map(Arc::clone), addr.clone())
                     } else {
-                        let candidates = pool.get_mega_healthy_candidates_ordered(10, &s.proxy_selection_order);
+                        let candidates = pool.get_mega_healthy_candidates_ordered(20, &s.proxy_selection_order);
                         if let Some(candidate) = candidates.first() {
                             let cand_addr = candidate.addr.to_string();
                             let read_timeout = Duration::from_secs(s.stall_watchdog_seconds.max(15));
@@ -1607,15 +1920,16 @@ pub async fn download_single_file(
                             (arc_cli, arc_cand, cand_addr)
                         } else {
                             cached_client = None;
-                            warn!("All proxies cooling down, waiting 10s before retrying...");
+                            warn!("All proxies cooling down, waiting 5s before retrying...");
                             {
                                 let mut info = task_info.write().await;
-                                info.error = Some("All proxies cooling down, waiting 10s before retrying...".to_string());
+                                info.error = Some("All proxies cooling down, waiting 5s before retrying...".to_string());
                                 info.speed_mbps = 0.0;
                                 info.eta_seconds = 0;
                             }
-                            tokio::time::sleep(Duration::from_secs(10)).await;
-                            let _ = work_tx.send(task).await;
+                            let _ = scheduler.lock().mark_retry(chunk.index, MAX_CHUNK_RETRIES);
+                            chunk_notify.notify_waiters();
+                            tokio::time::sleep(Duration::from_secs(5)).await;
                             active_workers.fetch_sub(1, Ordering::Relaxed);
                             continue;
                         }
@@ -1637,6 +1951,9 @@ pub async fn download_single_file(
                             Ok(r) if r.status() == StatusCode::FORBIDDEN => {
                                 return Err(MegaError::ApiError(403));
                             }
+                            Ok(r) if r.status() == StatusCode::GONE => {
+                                return Err(MegaError::ApiError(410));
+                            }
                             Ok(r) if r.status() == StatusCode::from_u16(509).unwrap_or(StatusCode::TOO_MANY_REQUESTS) => {
                                 return Err(MegaError::OverQuota);
                             }
@@ -1651,6 +1968,9 @@ pub async fn download_single_file(
 
                                 if r2.status() == StatusCode::FORBIDDEN {
                                     return Err(MegaError::ApiError(403));
+                                }
+                                if r2.status() == StatusCode::GONE {
+                                    return Err(MegaError::ApiError(410));
                                 }
                                 if r2.status() == StatusCode::from_u16(509).unwrap_or(StatusCode::TOO_MANY_REQUESTS) {
                                     return Err(MegaError::OverQuota);
@@ -1669,7 +1989,7 @@ pub async fn download_single_file(
                             match chunk_read {
                                 Ok(Ok(Some(bytes))) => {
                                     if bytes.is_empty() {
-                                        drop(resp); // Immediately drop stalled stream & close socket
+                                        drop(resp);
                                         return Err(MegaError::Io(std::io::Error::new(
                                             std::io::ErrorKind::TimedOut,
                                             "Stall watchdog: read delivered 0 bytes",
@@ -1728,7 +2048,10 @@ pub async fn download_single_file(
 
                     match res {
                         Ok(Ok(())) => {
-                            consecutive_errors.store(0, Ordering::Relaxed);
+                            {
+                                scheduler.lock().mark_completed(chunk.index);
+                            }
+                            chunk_notify.notify_waiters();
                             if s.reset_proxy_per_chunk {
                                 cached_client = None;
                             }
@@ -1738,25 +2061,29 @@ pub async fn download_single_file(
                                 proxy: proxy_addr,
                             }).await;
                         }
-                        Ok(Err(MegaError::ApiError(403))) => {
+                        Ok(Err(MegaError::ApiError(code))) if code == 403 || code == 410 => {
                             cached_client = None;
-                            warn!("HTTP 403 Forbidden on file '{}'; refreshing temporary download URL...", file_name_str);
-                            if let Ok(new_url) = mega_client.refresh_file_download_url(folder_handle_opt.as_deref(), &task.file_handle).await {
-                                *current_storage_url.write().await = new_url;
-                                consecutive_errors.store(0, Ordering::Relaxed);
-                            }
+                            warn!("HTTP {} on file '{}'; refreshing temporary download URL...", code, file_name_str);
+                            let _ = refresh_storage_url_debounced(
+                                &current_storage_url,
+                                &refresh_lock,
+                                &mega_client,
+                                folder_handle_opt.as_deref(),
+                                &file_handle_str,
+                                &current_url,
+                            ).await;
 
-                            if task.attempt < MAX_CHUNK_RETRIES && !cancel.is_cancelled() {
-                                let _ = work_tx.send(ChunkTask {
-                                    info: chunk,
-                                    file_handle: task.file_handle,
-                                    attempt: task.attempt + 1,
-                                }).await;
-                            } else if !cancel.is_cancelled() {
-                                let _ = result_tx.send(ChunkResult::Failed {
-                                    index: chunk.index,
-                                    error: format!("Chunk {} failed: HTTP 403 Forbidden after retries", chunk.index),
-                                }).await;
+                            let retry_result = { scheduler.lock().mark_retry(chunk.index, MAX_CHUNK_RETRIES) };
+                            match retry_result {
+                                Ok(_) => {
+                                    chunk_notify.notify_waiters();
+                                }
+                                Err(()) => {
+                                    let _ = result_tx.send(ChunkResult::Failed {
+                                        index: chunk.index,
+                                        error: format!("Chunk {} failed: HTTP {} after retries", chunk.index, code),
+                                    }).await;
+                                }
                             }
                         }
                         Ok(Err(MegaError::OverQuota)) => {
@@ -1783,23 +2110,29 @@ pub async fn download_single_file(
                             }
 
                             // Refresh URL on 509 quota hit
-                            if let Ok(new_url) = mega_client.refresh_file_download_url(folder_handle_opt.as_deref(), &task.file_handle).await {
-                                *current_storage_url.write().await = new_url;
-                            }
+                            let _ = refresh_storage_url_debounced(
+                                &current_storage_url,
+                                &refresh_lock,
+                                &mega_client,
+                                folder_handle_opt.as_deref(),
+                                &file_handle_str,
+                                &current_url,
+                            ).await;
 
-                            if task.attempt < MAX_CHUNK_RETRIES && !cancel.is_cancelled() {
-                                tokio::time::sleep(Duration::from_millis(500 * (task.attempt + 1) as u64)).await;
-                                let _ = work_tx.send(ChunkTask {
-                                    info: chunk,
-                                    file_handle: task.file_handle,
-                                    attempt: task.attempt + 1,
-                                }).await;
-                            } else if !cancel.is_cancelled() {
-                                error!("Chunk {} failed after {} quota retries", chunk.index, MAX_CHUNK_RETRIES);
-                                let _ = result_tx.send(ChunkResult::Failed {
-                                    index: chunk.index,
-                                    error: format!("Chunk {} failed: Quota limit after retries", chunk.index),
-                                }).await;
+                            tokio::time::sleep(Duration::from_millis(500 * (attempt + 1) as u64)).await;
+
+                            let retry_result = { scheduler.lock().mark_retry(chunk.index, MAX_CHUNK_RETRIES) };
+                            match retry_result {
+                                Ok(_) => {
+                                    chunk_notify.notify_waiters();
+                                }
+                                Err(()) => {
+                                    error!("Chunk {} failed after {} quota retries", chunk.index, MAX_CHUNK_RETRIES);
+                                    let _ = result_tx.send(ChunkResult::Failed {
+                                        index: chunk.index,
+                                        error: format!("Chunk {} failed: Quota limit after retries", chunk.index),
+                                    }).await;
+                                }
                             }
                         }
                         Ok(Err(e)) => {
@@ -1809,34 +2142,22 @@ pub async fn download_single_file(
                                 file_name_str, chunk.index, chunk.offset, proxy_addr, e
                             );
                             if let Some(candidate) = proxy_candidate {
-                                if s.proxy_ban_seconds > 0 {
-                                    candidate.mark_mega_509_cooldown(Duration::from_secs(s.proxy_ban_seconds.max(60)));
-                                } else {
-                                    pool.record_failure(&candidate);
-                                }
+                                pool.record_failure_at_all_levels(candidate.addr, Duration::from_secs(s.proxy_ban_seconds.max(60)));
                             }
+                            // Under proxy network errors / TLS drops / timeouts, the MEGA storage URL is STILL valid!
+                            tokio::time::sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
 
-                            let err_count = consecutive_errors.fetch_add(1, Ordering::Relaxed) + 1;
-                            if err_count >= 3 {
-                                warn!("3 consecutive errors on file '{}'; refreshing temporary download URL...", file_name_str);
-                                if let Ok(new_url) = mega_client.refresh_file_download_url(folder_handle_opt.as_deref(), &task.file_handle).await {
-                                    *current_storage_url.write().await = new_url;
-                                    consecutive_errors.store(0, Ordering::Relaxed);
+                            let retry_result = { scheduler.lock().mark_retry(chunk.index, MAX_CHUNK_RETRIES) };
+                            match retry_result {
+                                Ok(_) => {
+                                    chunk_notify.notify_waiters();
                                 }
-                            }
-
-                            if task.attempt < MAX_CHUNK_RETRIES && !cancel.is_cancelled() {
-                                tokio::time::sleep(Duration::from_millis(250 * (task.attempt + 1) as u64)).await;
-                                let _ = work_tx.send(ChunkTask {
-                                    info: chunk,
-                                    file_handle: task.file_handle,
-                                    attempt: task.attempt + 1,
-                                }).await;
-                            } else if !cancel.is_cancelled() {
-                                let _ = result_tx.send(ChunkResult::Failed {
-                                    index: chunk.index,
-                                    error: format!("Chunk {} failed after {} retries: {}", chunk.index, MAX_CHUNK_RETRIES, e),
-                                }).await;
+                                Err(()) => {
+                                    let _ = result_tx.send(ChunkResult::Failed {
+                                        index: chunk.index,
+                                        error: format!("Chunk {} failed after {} retries: {}", chunk.index, MAX_CHUNK_RETRIES, e),
+                                    }).await;
+                                }
                             }
                         }
                         Err(_) => {
@@ -1846,33 +2167,20 @@ pub async fn download_single_file(
                                 file_name_str, chunk.index, chunk.offset, proxy_addr
                             );
                             if let Some(candidate) = proxy_candidate {
-                                if s.proxy_ban_seconds > 0 {
-                                    candidate.mark_mega_509_cooldown(Duration::from_secs(s.proxy_ban_seconds.max(60)));
-                                } else {
-                                    pool.record_failure(&candidate);
-                                }
+                                pool.record_failure_at_all_levels(candidate.addr, Duration::from_secs(s.proxy_ban_seconds.max(60)));
                             }
 
-                            let err_count = consecutive_errors.fetch_add(1, Ordering::Relaxed) + 1;
-                            if err_count >= 3 {
-                                warn!("3 consecutive timeouts on file '{}'; refreshing temporary download URL...", file_name_str);
-                                if let Ok(new_url) = mega_client.refresh_file_download_url(folder_handle_opt.as_deref(), &task.file_handle).await {
-                                    *current_storage_url.write().await = new_url;
-                                    consecutive_errors.store(0, Ordering::Relaxed);
+                            let retry_result = { scheduler.lock().mark_retry(chunk.index, MAX_CHUNK_RETRIES) };
+                            match retry_result {
+                                Ok(_) => {
+                                    chunk_notify.notify_waiters();
                                 }
-                            }
-
-                            if task.attempt < MAX_CHUNK_RETRIES && !cancel.is_cancelled() {
-                                let _ = work_tx.send(ChunkTask {
-                                    info: chunk,
-                                    file_handle: task.file_handle,
-                                    attempt: task.attempt + 1,
-                                }).await;
-                            } else if !cancel.is_cancelled() {
-                                let _ = result_tx.send(ChunkResult::Failed {
-                                    index: chunk.index,
-                                    error: format!("Chunk {} permanently timed out", chunk.index),
-                                }).await;
+                                Err(()) => {
+                                    let _ = result_tx.send(ChunkResult::Failed {
+                                        index: chunk.index,
+                                        error: format!("Chunk {} permanently timed out", chunk.index),
+                                    }).await;
+                                }
                             }
                         }
                     }
@@ -1880,17 +2188,15 @@ pub async fn download_single_file(
             }));
         }
 
-        // CRITICAL INVARIANT: Explicitly drop coordinator-owned Senders so channel closes when workers exit!
-        drop(work_tx);
         drop(result_tx);
 
-        // Coordinator deterministic collection loop: terminate as soon as completed_chunks == total_chunks
         let mut download_error: Option<String> = None;
 
         while completed_chunks_count < total_chunks {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     file_cancel.cancel();
+                    chunk_notify.notify_waiters();
                     break;
                 }
                 res = result_rx.recv() => {
@@ -1898,7 +2204,11 @@ pub async fn download_single_file(
                         Some(ChunkResult::Success { index, size, proxy }) => {
                             completed_chunks_count += 1;
 
-                            // Record chunk in completed bitmap
+                            // Flush updated completed chunk bitmap to .looker-resume sidecar!
+                            let completed_indices = scheduler.lock().completed_indices();
+                            save_resume_state(out_path, file_handle, file_size, &completed_indices);
+
+                            // Record chunk in memory completed bitmap
                             {
                                 let mut map = completed_chunks_map.write().await;
                                 map.entry(file_handle.to_string())
@@ -1931,9 +2241,9 @@ pub async fn download_single_file(
                                 }
                             }
 
-                            // Terminate collection loop deterministically as soon as completed_chunks == total_chunks!
                             if completed_chunks_count == total_chunks {
                                 file_cancel.cancel();
+                                chunk_notify.notify_waiters();
                                 break;
                             }
                         }
@@ -1941,10 +2251,10 @@ pub async fn download_single_file(
                             error!("Chunk #{} of file '{}' failed: {}", index, file_name, error);
                             download_error = Some(error);
                             file_cancel.cancel();
+                            chunk_notify.notify_waiters();
                             break;
                         }
                         None => {
-                            // All worker senders dropped
                             if completed_chunks_count < total_chunks {
                                 download_error = Some(format!(
                                     "Workers finished prematurely for '{}' ({}/{} chunks completed)",
@@ -1960,17 +2270,19 @@ pub async fn download_single_file(
 
         // Cancel workers and await handles
         file_cancel.cancel();
+        chunk_notify.notify_waiters();
         for h in handles {
             let _ = h.await;
         }
 
         if let Some(err) = download_error {
-            // Flush and drop shared file before returning error
             {
                 let mut f = shared_file.lock().await;
                 let _ = f.flush().await;
             }
             drop(shared_file);
+            let completed_indices = scheduler.lock().completed_indices();
+            save_resume_state(out_path, file_handle, file_size, &completed_indices);
             return Err(err);
         }
     }
@@ -1981,6 +2293,8 @@ pub async fn download_single_file(
             let _ = f.flush().await;
         }
         drop(shared_file);
+        let completed_indices = scheduler.lock().completed_indices();
+        save_resume_state(out_path, file_handle, file_size, &completed_indices);
         return Err("Download cancelled or paused by user".to_string());
     }
 
@@ -2028,5 +2342,101 @@ pub async fn download_single_file(
         }
     }
 
+    // Remove .looker-resume sidecar file upon successful completion!
+    remove_resume_state(out_path);
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_atomic_chunk_scheduler_never_duplicates() {
+        let chunks: Vec<ChunkInfo> = (0..20)
+            .map(|i| ChunkInfo {
+                index: i,
+                offset: (i * 1024) as u64,
+                size: 1024,
+            })
+            .collect();
+
+        let mut completed_set = HashSet::new();
+        completed_set.insert(0);
+        completed_set.insert(1);
+
+        let mut scheduler = ChunkScheduler::new(chunks.clone(), 20 * 1024, &completed_set);
+        assert_eq!(scheduler.completed_count(), 2);
+        assert_eq!(scheduler.total_chunks(), 20);
+        assert_eq!(scheduler.total_size(), 20 * 1024);
+        assert!(!scheduler.is_all_completed());
+
+        // Simulate 4 concurrent workers acquiring chunks
+        let mut acquired = Vec::new();
+        for worker_id in 0..4 {
+            if let Some((c, attempt)) = scheduler.acquire_next_chunk(worker_id) {
+                acquired.push(c.index);
+                assert_eq!(attempt, 0);
+            }
+        }
+
+        // Chunks 0 and 1 were pre-completed, so workers must get indices 2, 3, 4, 5
+        assert_eq!(acquired, vec![2, 3, 4, 5]);
+        assert_eq!(scheduler.active_in_flight(), 4);
+
+        // All acquired indices must be distinct
+        let set: HashSet<usize> = acquired.iter().copied().collect();
+        assert_eq!(set.len(), acquired.len(), "Atomic scheduler must never assign duplicate chunks");
+
+        // Worker 0 completes chunk 2
+        scheduler.mark_completed(2);
+        assert_eq!(scheduler.completed_count(), 3);
+        assert_eq!(scheduler.active_in_flight(), 3);
+
+        // Worker 1 fails chunk 3 and marks retry
+        let retry_attempt = scheduler.mark_retry(3, 8).unwrap();
+        assert_eq!(retry_attempt, 1);
+
+        // Next worker acquires retried chunk 3
+        let (re_chunk, _) = scheduler.acquire_next_chunk(99).unwrap();
+        assert_eq!(re_chunk.index, 3);
+    }
+
+    #[test]
+    fn test_collision_safe_unique_path_generation() {
+        let temp_dir = std::env::temp_dir().join(format!("looker_test_collision_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        // 1. Folder collision test
+        let album_dir = temp_dir.join("Album");
+        std::fs::create_dir_all(&album_dir).unwrap();
+
+        let unique_folder1 = resolve_unique_path(&temp_dir, "Album", true, None, None);
+        assert_eq!(unique_folder1, temp_dir.join("Album (1)"));
+
+        std::fs::create_dir_all(&unique_folder1).unwrap();
+        let unique_folder2 = resolve_unique_path(&temp_dir, "Album", true, None, None);
+        assert_eq!(unique_folder2, temp_dir.join("Album (2)"));
+
+        // 2. File collision test without resume
+        let file_path = temp_dir.join("report.pdf");
+        std::fs::write(&file_path, b"content").unwrap();
+
+        let unique_file1 = resolve_unique_path(&temp_dir, "report.pdf", false, None, None);
+        assert_eq!(unique_file1, temp_dir.join("report (1).pdf"));
+
+        // 3. File resume preservation test
+        let partial_path = temp_dir.join("download.zip");
+        std::fs::write(&partial_path, b"partial").unwrap();
+        save_resume_state(&partial_path, "handle_xyz", 1000, &[0, 1]);
+
+        // When file_handle and size match existing .looker-resume sidecar, it must resume same path!
+        let resumed_path = resolve_unique_path(&temp_dir, "download.zip", false, Some("handle_xyz"), Some(1000));
+        assert_eq!(resumed_path, partial_path, "Must preserve existing partial file path when resume state matches");
+
+        // Clean up
+        remove_resume_state(&partial_path);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
 }
