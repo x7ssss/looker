@@ -1,11 +1,23 @@
-# Looker - Native Rust Proxy Harvester, Local Gateway & Multi-Slot MEGA Downloader
+<p align="center">
+  <img src="logo.png" width="112" height="112" alt="Looker Logo" />
+</p>
 
-> A self-contained Windows & Linux desktop app that scrapes and validates thousands of public proxies in the background and uses them to bypass MEGA transfer quota walls automatically.
+<h1 align="center">Looker</h1>
 
-[![Release](https://img.shields.io/github/v/release/x7ssss/looker?color=emerald)](https://github.com/x7ssss/looker/releases/latest)
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
-[![Platform: Windows & Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20(x64)-informational.svg)](https://github.com/x7ssss/looker/releases/latest)
-[![Rust: 1.80+](https://img.shields.io/badge/Rust-1.80+-orange.svg)](https://www.rust-lang.org)
+<p align="center">
+  <b>Native Rust Proxy Harvester, Local Gateway &amp; Multi-Slot MEGA Downloader</b>
+</p>
+
+<p align="center">
+  <a href="https://github.com/x7ssss/looker/releases/latest"><img src="https://img.shields.io/github/v/release/x7ssss/looker?color=emerald" alt="Release" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-GPL--3.0-blue.svg" alt="License: GPL-3.0" /></a>
+  <a href="https://github.com/x7ssss/looker/releases/latest"><img src="https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20(x64)-informational.svg" alt="Platform" /></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-1.80+-orange.svg" alt="Rust: 1.80+" /></a>
+</p>
+
+<p align="center">
+  A self-contained Windows &amp; Linux desktop app that scrapes and validates thousands of public proxies in the background and uses them to bypass MEGA transfer quota walls automatically.
+</p>
 
 ---
 
