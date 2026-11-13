@@ -4,8 +4,8 @@ out/
 /out/
 temp_megabasterd/
 downloads/
-dist/
-dist-all/
+/dist/
+/dist-all/
 
 # Runtime and local state
 *.looker-resume

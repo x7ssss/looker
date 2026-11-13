@@ -482,16 +482,16 @@
     * `test_sanitize_folder_name`: tests invalid Windows character stripping and formatting.
 - [x] Full workspace verification: 44 tests green across all crates, `cargo check -p looker-app` clean.
 
-### Phase 17: Production Release Hardening & GitHub Launch (v0.1.0 - x7sss)
+### Phase 17: Production Release Hardening & GitHub Launch (v0.1.0 - x7ssss)
 - [x] UI Copy & Layout Cleanup:
   - Simplified window title in `crates/looker-app/src/main.rs`, `tauri.conf.json`, and `crates/looker-gateway/ui/dist/index.html` to simply "Looker".
   - Cleaned up Downloader view header: stripped "MEGA Downloader Studio", green "QUOTA-BYPASS ENGINE" badge, and long technical cipher subtitle; established clean, direct "MEGA Links" label above input.
   - Streamlined Settings modal header to "Settings" (removed "Power-User" prefix, "SUITE" badge, and subtitle).
   - Clarified settings field labels: "Verify file integrity", "Fastest first", "Command on 509 limit", and "Backup & Reset".
-  - Replaced bottom footer bar with minimal: "Looker v0.1.0 · MIT License · github.com/x7ssss/looker" linking to https://github.com/x7ssss/looker.
+  - Replaced bottom footer bar with minimal: "Looker v0.1.0 · GPL-3.0 License · github.com/x7ssss/looker" linking to https://github.com/x7ssss/looker.
 - [x] License & Cargo Workspace Metadata:
-  - Created root `LICENSE` file containing standard MIT License with `Copyright (c) 2026 x7sss`.
-  - Updated root `Cargo.toml` `[workspace.package]` with author `["x7sss"]`, `license = "MIT"`, `repository = "https://github.com/x7ssss/looker"`, `homepage = "https://github.com/x7ssss/looker"`, and production description.
+  - Created root `LICENSE` file containing GNU General Public License v3.0 (GPL-3.0) with `Copyright (C) 2026 x7ssss`.
+  - Updated root `Cargo.toml` `[workspace.package]` with author `["x7ssss"]`, `license = "GPL-3.0-only"`, `repository = "https://github.com/x7ssss/looker"`, `homepage = "https://github.com/x7ssss/looker"`, and production description.
 - [x] Production Hardening & CSRF Protection:
   - Removed `"devtools"` feature from release dependencies in `crates/looker-app/Cargo.toml`; scoped F12 WebView2 DevTools invocation strictly to debug builds (`#[cfg(debug_assertions)]`).
   - Preserved built-in Live Debug Console drawer (`Ctrl+Shift+D` and Debug dropdown) in production release builds for live chunk tracing and diagnostic log export.
@@ -499,7 +499,7 @@
   - Implemented CSRF / Cross-Origin middleware guard on all `/api/*` routes in `crates/looker-gateway/src/server.rs`, rejecting requests with external `Origin` or `Referer` headers (`403 Forbidden`) while permitting missing headers and local loopback/Tauri origins.
 - [x] Original Production README.md:
   - Created sharp, production-ready, completely original `README.md` highlighting autonomous proxy harvesting across 52 feeds, passive 509 failover & force proxy modes, in-flight AES-128-CTR decryption, CBC-MAC validation, interactive folder pruning, persistent queue, and troubleshooting stalled transfers.
-  - Included direct links to latest release installer (`Looker-Setup-x64.exe`), build-from-source guides, and acknowledgments to `tonikelope/megabasterd` and `monosans/proxy-scraper-checker`.
+  - Included direct links to latest release installer (`Looker-Setup-x64.exe`), build-from-source guides, and GPL-3.0 licensing details.
 - [x] GitHub Actions CI/CD Workflow (`.github/workflows/release.yml`):
   - Configured triggers on version tags (`v*`) and `workflow_dispatch`.
   - Added `cargo test --workspace` run on `windows-latest` prior to release artifact packaging.

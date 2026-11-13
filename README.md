@@ -3,7 +3,7 @@
 > A self-contained Windows desktop app that scrapes and validates thousands of public proxies in the background and uses them to bypass MEGA transfer quota walls automatically.
 
 [![Release](https://img.shields.io/github/v/release/x7ssss/looker?color=emerald)](https://github.com/x7ssss/looker/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 [![Platform: Windows](https://img.shields.io/badge/Platform-Windows%20(x64)-informational.svg)](https://github.com/x7ssss/looker/releases/latest)
 [![Rust: 1.80+](https://img.shields.io/badge/Rust-1.80+-orange.svg)](https://www.rust-lang.org)
 
@@ -67,20 +67,12 @@ The resulting standalone executable and setup wizard will be generated in `targe
 
 ---
 
-## Acknowledgments
-
-Looker builds upon concepts pioneered by the open-source community:
-- [tonikelope/megabasterd](https://github.com/tonikelope/megabasterd) - Inspiration for the SmartProxy 509 failover mechanism, chunk slot rotation, and folder link parsing.
-- [monosans/proxy-scraper-checker](https://github.com/monosans/proxy-scraper-checker) - Inspiration for curated public proxy feed aggregation and concurrent socket validation patterns.
-
----
-
 ## Disclaimer
 
-Looker is an independent open-source network utility created for research, testing, and backup purposes. It is provided "as is" under the MIT License without warranties of any kind. Looker is not affiliated with, endorsed by, or associated with MEGA Limited or any of its subsidiaries. Users are solely responsible for complying with MEGA's Terms of Service and applicable local laws in their jurisdiction.
+Looker is an independent open-source network utility created for research, testing, and backup purposes. It is provided "as is" under the GNU General Public License v3.0 (GPL-3.0) without warranties of any kind. Looker is not affiliated with, endorsed by, or associated with MEGA Limited or any of its subsidiaries. Users are solely responsible for complying with MEGA's Terms of Service and applicable local laws in their jurisdiction.
 
 ---
 
 ## License
 
-Copyright (c) 2026 x7sss. Distributed under the [MIT License](LICENSE).
+Copyright (C) 2026 x7ssss. Distributed under the [GNU General Public License v3.0](LICENSE).
