@@ -16,11 +16,23 @@ use tauri::webview::NewWindowResponse;
 use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter("looker=info,looker_app=info,looker_gateway=info")
-        .init();
+    let log_buffer = looker_gateway::global_log_buffer().clone();
+    let buffer_layer = looker_gateway::LogBufferLayer::new(log_buffer);
+
+    let _ = tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "looker=info,looker_app=info,looker_gateway=info,looker_mega=info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .with(buffer_layer)
+        .try_init();
+
+    let (devtools_tx, mut devtools_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    looker_gateway::set_devtools_trigger(devtools_tx);
 
     info!("Starting Looker Desktop Shell (Tauri v2)...");
 
@@ -156,7 +168,7 @@ fn main() {
 
             let mut tray_builder = TrayIconBuilder::new()
                 .menu(&menu)
-                .tooltip("LOOKER // Rotating Proxy Gateway & Downloader")
+                .tooltip("Looker")
                 .on_menu_event(move |app, event| match event.id.as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
@@ -196,22 +208,50 @@ fn main() {
 
             let _tray = tray_builder.build(app)?;
 
-            let _builder = WebviewWindowBuilder::new(
+            #[allow(unused_variables)]
+            let window = WebviewWindowBuilder::new(
                 app,
                 "main",
                 WebviewUrl::External("http://127.0.0.1:8080/ui".parse().unwrap()),
             )
-            .title("LOOKER // Network Control & Proxy Gateway")
+            .title("Looker")
             .inner_size(1280.0, 800.0)
             .min_inner_size(900.0, 600.0)
             .center()
             .resizable(true)
-            .background_color(tauri::window::Color(9, 9, 11, 255))
+            .background_color(tauri::window::Color(12, 13, 16, 255))
+            .initialization_script(r#"
+                window.addEventListener('keydown', (e) => {
+                    if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'i'))) {
+                        e.preventDefault();
+                        fetch('/api/system/open-devtools', { method: 'POST' }).catch(() => {});
+                    }
+                });
+            "#)
             .on_new_window(|url, _features| {
                 let _ = opener::open(url.as_str());
                 NewWindowResponse::Deny
             })
             .build()?;
+
+            #[cfg(debug_assertions)]
+            let window_for_devtools = window.clone();
+            tauri::async_runtime::spawn(async move {
+                while let Some(()) = devtools_rx.recv().await {
+                    #[cfg(debug_assertions)]
+                    {
+                        if window_for_devtools.is_devtools_open() {
+                            window_for_devtools.close_devtools();
+                        } else {
+                            window_for_devtools.open_devtools();
+                        }
+                    }
+                    #[cfg(not(debug_assertions))]
+                    {
+                        info!("[LOOKER APP] WebView2 DevTools is disabled in production release builds. Use Ctrl+Shift+D for the Live Debug Console.");
+                    }
+                }
+            });
 
             Ok(())
         })

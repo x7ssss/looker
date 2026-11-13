@@ -303,7 +303,7 @@ async fn test_gateway_live_and_status_endpoints() {
 
     assert!(resp_str3.starts_with("HTTP/1.1 200 OK"));
     assert!(resp_str3.contains("Content-Type: text/html"));
-    assert!(resp_str3.contains("LOOKER"));
+    assert!(resp_str3.contains("Looker") || resp_str3.contains("LOOKER"));
 
     // 4. Test GET /api/proxies
     let mut client4 = TcpStream::connect(gateway_addr).await.unwrap();
@@ -414,4 +414,155 @@ async fn test_gateway_live_and_status_endpoints() {
     let n11 = client11.read(&mut resp_buf11).await.unwrap();
     let resp_str11 = String::from_utf8_lossy(&resp_buf11[..n11]);
     assert!(resp_str11.starts_with("HTTP/1.1 204 No Content"));
+
+    // 12. Test GET /api/mega/config
+    let mut client12 = TcpStream::connect(gateway_addr).await.unwrap();
+    client12
+        .write_all(b"GET /api/mega/config HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut resp_buf12 = vec![0u8; 1024];
+    let n12 = client12.read(&mut resp_buf12).await.unwrap();
+    let resp_str12 = String::from_utf8_lossy(&resp_buf12[..n12]);
+    assert!(resp_str12.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str12.contains("\"routing_mode\""));
+    assert!(resp_str12.contains("\"workers_per_file\""));
+
+    // 13. Test POST /api/mega/config
+    let mut client13 = TcpStream::connect(gateway_addr).await.unwrap();
+    let cfg_payload = b"{\"routing_mode\":\"force_proxy\",\"workers_per_file\":12,\"max_concurrent_files\":3,\"speed_limit_mbps\":50.0}";
+    client13
+        .write_all(format!("POST /api/mega/config HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\n\r\n{}", cfg_payload.len(), std::str::from_utf8(cfg_payload).unwrap()).as_bytes())
+        .await
+        .unwrap();
+    let mut resp_buf13 = vec![0u8; 1024];
+    let n13 = client13.read(&mut resp_buf13).await.unwrap();
+    let resp_str13 = String::from_utf8_lossy(&resp_buf13[..n13]);
+    assert!(resp_str13.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp_str13.contains("\"force_proxy\""));
+    assert!(resp_str13.contains("\"workers_per_file\":12"));
+}
+
+#[tokio::test]
+async fn test_disk_space_and_config_validation() {
+    use looker_gateway::download::{check_available_disk_space, DownloaderConfig};
+
+    // Test disk check with 0 or small bytes on temp dir
+    let temp_dir = std::env::temp_dir();
+    assert!(check_available_disk_space(&temp_dir, 1024).is_ok());
+
+    // Test enormous requirement (e.g. 10,000 Terabytes) should fail
+    let huge_bytes = 10_000_000_000_000_000u64;
+    let res = check_available_disk_space(&temp_dir, huge_bytes);
+    assert!(res.is_err());
+    assert!(res.unwrap_err().contains("Insufficient disk space"));
+
+    // Test DownloaderConfig clamping
+    let mut cfg = DownloaderConfig {
+        routing_mode: "INVALID".to_string(),
+        workers_per_file: 999,
+        max_concurrent_files: 99,
+        speed_limit_mbps: -10.0,
+    };
+    cfg.sanitize();
+    assert_eq!(cfg.routing_mode, "passive");
+    assert_eq!(cfg.workers_per_file, 24);
+    assert_eq!(cfg.max_concurrent_files, 5);
+    assert_eq!(cfg.speed_limit_mbps, 0.0);
+}
+
+#[tokio::test]
+async fn test_api_csrf_origin_guard_and_strict_bind() {
+    let pool = Arc::new(ProxyPool::new());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = listener.local_addr().unwrap();
+
+    let config = GatewayConfig {
+        bind_addr: gateway_addr,
+        max_retries: 2,
+        connect_timeout: Duration::from_secs(2),
+        buffer_size: 16384,
+    };
+    let gateway = ProxyGateway::new(config, Arc::clone(&pool));
+
+    tokio::spawn(async move {
+        let _ = gateway.run_on_listener(listener).await;
+    });
+
+    // 1. External Origin rejected on /api/* (403 Forbidden)
+    let mut client1 = TcpStream::connect(gateway_addr).await.unwrap();
+    client1
+        .write_all(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://malicious-site.com\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf1 = vec![0u8; 1024];
+    let n1 = client1.read(&mut buf1).await.unwrap();
+    let resp1 = String::from_utf8_lossy(&buf1[..n1]);
+    assert!(resp1.starts_with("HTTP/1.1 403 Forbidden"), "Expected 403 Forbidden for external Origin, got: {}", resp1);
+
+    // 2. External Referer rejected on /api/* (403 Forbidden)
+    let mut client2 = TcpStream::connect(gateway_addr).await.unwrap();
+    client2
+        .write_all(b"GET /api/settings HTTP/1.1\r\nHost: 127.0.0.1\r\nReferer: https://evil.org/steal.html\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf2 = vec![0u8; 1024];
+    let n2 = client2.read(&mut buf2).await.unwrap();
+    let resp2 = String::from_utf8_lossy(&buf2[..n2]);
+    assert!(resp2.starts_with("HTTP/1.1 403 Forbidden"), "Expected 403 Forbidden for external Referer, got: {}", resp2);
+
+    // 3. Allowed Origin http://127.0.0.1:8080 succeeds (200 OK)
+    let mut client3 = TcpStream::connect(gateway_addr).await.unwrap();
+    client3
+        .write_all(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://127.0.0.1:8080\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf3 = vec![0u8; 1024];
+    let n3 = client3.read(&mut buf3).await.unwrap();
+    let resp3 = String::from_utf8_lossy(&buf3[..n3]);
+    assert!(resp3.starts_with("HTTP/1.1 200 OK"), "Expected 200 OK for allowed 127.0.0.1:8080 Origin, got: {}", resp3);
+
+    // 4. Allowed Origin http://localhost:8080 succeeds (200 OK)
+    let mut client4 = TcpStream::connect(gateway_addr).await.unwrap();
+    client4
+        .write_all(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: http://localhost:8080\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf4 = vec![0u8; 1024];
+    let n4 = client4.read(&mut buf4).await.unwrap();
+    let resp4 = String::from_utf8_lossy(&buf4[..n4]);
+    assert!(resp4.starts_with("HTTP/1.1 200 OK"), "Expected 200 OK for allowed localhost:8080 Origin, got: {}", resp4);
+
+    // 5. Allowed Origin tauri://localhost succeeds (200 OK)
+    let mut client5 = TcpStream::connect(gateway_addr).await.unwrap();
+    client5
+        .write_all(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: tauri://localhost\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf5 = vec![0u8; 1024];
+    let n5 = client5.read(&mut buf5).await.unwrap();
+    let resp5 = String::from_utf8_lossy(&buf5[..n5]);
+    assert!(resp5.starts_with("HTTP/1.1 200 OK"), "Expected 200 OK for tauri://localhost Origin, got: {}", resp5);
+
+    // 6. Missing Origin and Referer succeeds (200 OK)
+    let mut client6 = TcpStream::connect(gateway_addr).await.unwrap();
+    client6
+        .write_all(b"GET /api/status HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf6 = vec![0u8; 1024];
+    let n6 = client6.read(&mut buf6).await.unwrap();
+    let resp6 = String::from_utf8_lossy(&buf6[..n6]);
+    assert!(resp6.starts_with("HTTP/1.1 200 OK"), "Expected 200 OK for missing Origin/Referer, got: {}", resp6);
+
+    // 7. Non-API route (/live.txt) with external Origin is NOT blocked
+    let mut client7 = TcpStream::connect(gateway_addr).await.unwrap();
+    client7
+        .write_all(b"GET /live.txt HTTP/1.1\r\nHost: 127.0.0.1\r\nOrigin: https://some-other-site.com\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf7 = vec![0u8; 1024];
+    let n7 = client7.read(&mut buf7).await.unwrap();
+    let resp7 = String::from_utf8_lossy(&buf7[..n7]);
+    assert!(resp7.starts_with("HTTP/1.1 200 OK"), "Expected 200 OK on /live.txt, got: {}", resp7);
 }

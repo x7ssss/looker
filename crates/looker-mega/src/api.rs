@@ -78,7 +78,7 @@ enum FolderTreeApiResponse {
 pub struct MegaClient {
     direct_http: Client,
     gateway_http: Option<Client>,
-    api_url: &'static str,
+    api_url: std::borrow::Cow<'static, str>,
 }
 
 impl Default for MegaClient {
@@ -100,7 +100,8 @@ impl MegaClient {
     pub fn new(proxy_url: Option<&str>) -> Self {
         let direct_http = Client::builder()
             .use_rustls_tls()
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(8))
+            .read_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(20))
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Looker/0.1.0")
             .build()
@@ -110,7 +111,8 @@ impl MegaClient {
             if let Ok(p) = Proxy::all(proxy) {
                 Client::builder()
                     .use_rustls_tls()
-                    .connect_timeout(Duration::from_secs(10))
+                    .connect_timeout(Duration::from_secs(8))
+                    .read_timeout(Duration::from_secs(15))
                     .timeout(Duration::from_secs(25))
                     .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Looker/0.1.0")
                     .proxy(p)
@@ -124,8 +126,14 @@ impl MegaClient {
         Self {
             direct_http,
             gateway_http,
-            api_url: "https://g.api.mega.co.nz/cs",
+            api_url: std::borrow::Cow::Borrowed("https://g.api.mega.co.nz/cs"),
         }
+    }
+
+    /// Sets a custom API URL (primarily for testing/mocking).
+    pub fn with_api_url(mut self, url: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        self.api_url = url.into();
+        self
     }
 
     /// Creates a direct-only MegaClient without proxy fallback.
@@ -332,6 +340,50 @@ impl MegaClient {
                 -16 => Err(MegaError::Blocked),
                 code => Err(MegaError::ApiError(code)),
             },
+        }
+    }
+
+    /// Refreshes temporary storage node URL (`gfs*.userstorage.mega.co.nz`) for a file.
+    /// Works for files inside public folders (providing `folder_handle`) or standalone files.
+    pub async fn refresh_file_download_url(
+        &self,
+        folder_handle: Option<&str>,
+        file_handle: &str,
+    ) -> Result<String, MegaError> {
+        if let Some(fh) = folder_handle {
+            let (url, _) = self.get_folder_file_url(fh, file_handle).await?;
+            Ok(url)
+        } else {
+            let seq = SEQ_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let url = format!("{}?id={}", self.api_url, seq);
+            let payload = vec![DownloadReq {
+                a: "g",
+                g: 1,
+                ssl: 2,
+                p: file_handle,
+            }];
+            let api_resp: ApiResponse = self.post_api(&url, &payload).await?;
+            match api_resp {
+                ApiResponse::Success(mut list) => {
+                    let first = list.pop().ok_or(MegaError::NotFound)?;
+                    Ok(first.g)
+                }
+                ApiResponse::ErrorArray(errs) => {
+                    let err = errs.first().copied().unwrap_or(-1);
+                    match err {
+                        -17 => Err(MegaError::OverQuota),
+                        -9 => Err(MegaError::NotFound),
+                        -16 => Err(MegaError::Blocked),
+                        code => Err(MegaError::ApiError(code)),
+                    }
+                }
+                ApiResponse::Error(err_code) => match err_code {
+                    -17 => Err(MegaError::OverQuota),
+                    -9 => Err(MegaError::NotFound),
+                    -16 => Err(MegaError::Blocked),
+                    code => Err(MegaError::ApiError(code)),
+                },
+            }
         }
     }
 }

@@ -7,10 +7,11 @@ license.workspace = true
 description = "Local 127.0.0.1:8080 rotating proxy listener with pre-commit retries"
 
 [dependencies]
-tokio = { workspace = true, features = ["net", "io-util", "sync", "time"] }
+tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "process"] }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 socket2 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -22,6 +23,8 @@ looker-mega = { workspace = true }
 reqwest = { workspace = true }
 dirs = { workspace = true }
 rfd = { workspace = true }
+opener = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

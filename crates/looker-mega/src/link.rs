@@ -17,13 +17,19 @@ impl MegaLink {
     /// - Modern Folder: `https://mega.nz/folder/{root_id}#{key}`
     /// - Modern Subfolder Deep-Link: `https://mega.nz/folder/{root_id}#{key}/folder/{sub_folder_id}`
     /// - Modern Folder File Deep-Link: `https://mega.nz/folder/{root_id}#{key}/file/{target_file_id}`
-    /// - Legacy Folder: `https://mega.nz/#F!{id}!{key}`
+    /// Parses public MEGA link formats:
+    /// - Modern File: `https://mega.nz/file/{handle}#{key}`
+    /// - Legacy File: `https://mega.nz/#!{handle}!{key}`
+    /// - Modern Folder: `https://mega.nz/folder/{root_id}#{key}`
+    /// - Modern Subfolder Deep-Link: `https://mega.nz/folder/{root_id}#{key}/folder/{sub_folder_id}`
+    /// - Modern Folder File Deep-Link: `https://mega.nz/folder/{root_id}#{key}/file/{target_file_id}`
+    /// - Legacy Folder: `https://mega.nz/#F!{id}!{key}` and `https://mega.nz/#F!{id}@{sub_id}!{key}`
     pub fn parse(url: &str) -> Result<Self, MegaError> {
         let clean = url.trim();
 
-        // 1. Modern Folder & Deep-Links: /folder/{root_id}#{fragment}
-        if let Some(pos) = clean.find("/folder/") {
-            let after = &clean[pos + 8..];
+        // 1. Modern Folder & Deep-Links: /folder/{root_id}#{fragment} or folder/{root_id}#{fragment}
+        if let Some(pos) = clean.find("/folder/").map(|p| p + 8).or_else(|| clean.find("folder/").map(|p| p + 7)) {
+            let after = &clean[pos..];
             let mut parts = after.splitn(2, '#');
             let handle = parts.next().unwrap_or("").trim();
             let fragment = parts.next().unwrap_or("").trim();
@@ -62,14 +68,23 @@ impl MegaLink {
             }
         }
 
-        // 2. Legacy Folder: /#F!{id}!{key} (optional !{subfile_id})
-        if let Some(pos) = clean.find("/#F!") {
-            let after = &clean[pos + 4..];
+        // 2. Legacy Folder: #F!{id}!{key} or #F!{id}@{sub_id}!{key} (optional !{subfile_id})
+        if let Some(pos) = clean.find("#F!") {
+            let after = &clean[pos + 3..];
             let parts: Vec<&str> = after.split('!').collect();
             if parts.len() >= 2 {
-                let handle = parts[0].trim().to_string();
+                let raw_handle = parts[0].trim();
                 let key = parts[1].trim().to_string();
-                let subfile_handle = if parts.len() >= 3 && !parts[2].is_empty() {
+
+                let (handle, sub_folder_id) = if let Some(at_idx) = raw_handle.find('@') {
+                    let root = raw_handle[..at_idx].trim().to_string();
+                    let sub = raw_handle[at_idx + 1..].trim().to_string();
+                    (root, if sub.is_empty() { None } else { Some(sub) })
+                } else {
+                    (raw_handle.to_string(), None)
+                };
+
+                let subfile_handle = if parts.len() >= 3 && !parts[2].trim().is_empty() {
                     Some(parts[2].trim().to_string())
                 } else {
                     None
@@ -83,16 +98,16 @@ impl MegaLink {
                         key,
                         is_folder,
                         subfile_handle,
-                        sub_folder_id: None,
+                        sub_folder_id,
                         target_file_id,
                     });
                 }
             }
         }
 
-        // 3. Modern File: /file/{handle}#{key}
-        if let Some(pos) = clean.find("/file/") {
-            let after = &clean[pos + 6..];
+        // 3. Modern File: /file/{handle}#{key} or file/{handle}#{key}
+        if let Some(pos) = clean.find("/file/").map(|p| p + 6).or_else(|| clean.find("file/").map(|p| p + 5)) {
+            let after = &clean[pos..];
             let mut parts = after.splitn(2, '#');
             let handle = parts.next().unwrap_or("").trim();
             let key = parts.next().unwrap_or("").trim();
@@ -109,9 +124,9 @@ impl MegaLink {
             }
         }
 
-        // 4. Legacy File: /#!{handle}!{key}
-        if let Some(pos) = clean.find("/#!") {
-            let after = &clean[pos + 3..];
+        // 4. Legacy File: #!{handle}!{key}
+        if let Some(pos) = clean.find("#!") {
+            let after = &clean[pos + 2..];
             let mut parts = after.splitn(2, '!');
             let handle = parts.next().unwrap_or("").trim();
             let key = parts.next().unwrap_or("").trim();
@@ -129,6 +144,10 @@ impl MegaLink {
         }
 
         Err(MegaError::InvalidUrl(url.to_string()))
+    }
+
+    pub fn root_id(&self) -> &str {
+        &self.handle
     }
 
     pub fn is_folder(&self) -> bool {
@@ -179,5 +198,13 @@ mod tests {
         assert_eq!(link_sub.key, "FolderKey12345678901234");
         assert!(!link_sub.is_folder());
         assert_eq!(link_sub.subfile_handle.as_deref(), Some("SubFile1"));
+
+        let legacy_subfolder = "https://mega.nz/#F!HqJUnY4J@fzxBDZKC!lBStkttzdoYm7HA0M13nmg";
+        let link_legacy_sub = MegaLink::parse(legacy_subfolder).unwrap();
+        assert_eq!(link_legacy_sub.root_id(), "HqJUnY4J");
+        assert_eq!(link_legacy_sub.handle, "HqJUnY4J");
+        assert_eq!(link_legacy_sub.sub_folder_id.as_deref(), Some("fzxBDZKC"));
+        assert_eq!(link_legacy_sub.key, "lBStkttzdoYm7HA0M13nmg");
+        assert!(link_legacy_sub.is_folder());
     }
 }

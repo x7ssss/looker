@@ -1,8 +1,26 @@
+target/
 /target
+out/
 /out/
+temp_megabasterd/
+downloads/
+dist/
+dist-all/
+
+# Runtime and local state
 *.looker-resume
-**/*.rs.bk
+queue.json
+settings.json
+*.log
 *.mmdb
+
+# Backup and temp files
+**/*.rs.bk
+*.tmp
+*.bak
+
+# IDE & OS files
 .idea/
 .vscode/
-*.log
+.DS_Store
+Thumbs.db

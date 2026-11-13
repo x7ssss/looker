@@ -208,6 +208,79 @@ impl ProxyPool {
         healthy
     }
 
+    /// Returns healthy proxy candidates that are not on MEGA 509 cooldown, ordered by "sequential" (fastest latency first) or "random".
+    /// If all healthy proxies are in cooldown, falls back to regular healthy candidates to prevent hard stalls.
+    pub fn get_mega_healthy_candidates_ordered(&self, max_candidates: usize, order: &str) -> Vec<Arc<ProxyItem>> {
+        let items = self.items.read();
+        let mut mega_healthy: Vec<Arc<ProxyItem>> = items
+            .iter()
+            .filter(|i| i.is_healthy() && !i.is_mega_cooldown())
+            .map(Arc::clone)
+            .collect();
+
+        if mega_healthy.is_empty() {
+            let mut fallback: Vec<Arc<ProxyItem>> = items
+                .iter()
+                .filter(|i| i.is_healthy())
+                .map(Arc::clone)
+                .collect();
+            if order.eq_ignore_ascii_case("random") {
+                use rand::seq::SliceRandom;
+                let mut rng = rand::thread_rng();
+                fallback.shuffle(&mut rng);
+            } else {
+                fallback.sort_by_key(|i| {
+                    let ms = i.latency_ms.load(Ordering::Relaxed);
+                    if ms == 0 {
+                        99999
+                    } else {
+                        ms
+                    }
+                });
+            }
+            fallback.truncate(max_candidates);
+            return fallback;
+        }
+
+        if order.eq_ignore_ascii_case("random") {
+            use rand::seq::SliceRandom;
+            let mut rng = rand::thread_rng();
+            mega_healthy.shuffle(&mut rng);
+        } else {
+            mega_healthy.sort_by_key(|i| {
+                let ms = i.latency_ms.load(Ordering::Relaxed);
+                if ms == 0 {
+                    99999
+                } else {
+                    ms
+                }
+            });
+        }
+
+        mega_healthy.truncate(max_candidates);
+        mega_healthy
+    }
+
+    /// Returns healthy proxy candidates that are not on MEGA 509 cooldown, sorted by latency (sequential).
+    pub fn get_mega_healthy_candidates(&self, max_candidates: usize) -> Vec<Arc<ProxyItem>> {
+        self.get_mega_healthy_candidates_ordered(max_candidates, "sequential")
+    }
+
+    /// Marks a proxy identified by address on MEGA 509 quota cooldown.
+    /// Does not increment failure strikes or trip the circuit breaker.
+    pub fn mark_mega_cooldown(&self, addr: SocketAddr, cooldown: Duration) {
+        let items = self.items.read();
+        if let Some(item) = items.iter().find(|i| i.addr == addr) {
+            item.mark_mega_509_cooldown(cooldown);
+        }
+    }
+
+    /// Returns count of proxies currently on active MEGA 509 cooldown.
+    pub fn mega_cooldown_count(&self) -> usize {
+        let items = self.items.read();
+        items.iter().filter(|i| i.is_mega_cooldown()).count()
+    }
+
     /// Returns all currently healthy proxies.
     pub fn list_healthy(&self) -> Vec<Arc<ProxyItem>> {
         let items = self.items.read();
@@ -769,5 +842,43 @@ mod tests {
         assert!(temp_dir.join("proxies/socks5.txt").exists());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_mega_509_cooldown_does_not_evict_from_general_pool() {
+        let pool = ProxyPool::new();
+        let addr1: SocketAddr = "7.7.7.1:8080".parse().unwrap();
+        let addr2: SocketAddr = "7.7.7.2:8080".parse().unwrap();
+
+        pool.add(addr1, ProxyProto::HttpConnect, None);
+        pool.add(addr2, ProxyProto::HttpConnect, None);
+
+        assert_eq!(pool.healthy_count(), 2);
+        assert_eq!(pool.mega_cooldown_count(), 0);
+
+        // Mark addr1 on MEGA 509 cooldown
+        pool.mark_mega_cooldown(addr1, Duration::from_secs(3600));
+
+        // Proxy 1 is still healthy for general HTTP/SOCKS routing!
+        assert_eq!(pool.healthy_count(), 2);
+        assert_eq!(pool.mega_cooldown_count(), 1);
+
+        // General healthy candidates include both proxies
+        let general_candidates = pool.get_healthy_candidates(10);
+        assert_eq!(general_candidates.len(), 2);
+
+        // But MEGA candidates exclude addr1 and only return addr2
+        let mega_candidates = pool.get_mega_healthy_candidates(10);
+        assert_eq!(mega_candidates.len(), 1);
+        assert_eq!(mega_candidates[0].addr, addr2);
+
+        // Test sequential vs random ordered candidates
+        let seq = pool.get_mega_healthy_candidates_ordered(10, "sequential");
+        assert_eq!(seq.len(), 1);
+        assert_eq!(seq[0].addr, addr2);
+
+        let rnd = pool.get_mega_healthy_candidates_ordered(10, "random");
+        assert_eq!(rnd.len(), 1);
+        assert_eq!(rnd[0].addr, addr2);
     }
 }

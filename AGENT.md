@@ -311,6 +311,204 @@
   - Verified `test_load_warm_boot_candidates` in `looker-scraper`.
   - Full workspace test suite passes with 34 green unit and integration tests.
 
+### Phase 13: MegaBasterd Feature Parity (Interactive Folder Tree with Keep/Remove Selection, Legacy #F! Link Support, Persistent Batch Queue, Smart 509 Proxy Cooldowns, and Live Worker Controls)
+- [x] Reference Audit & Clean-Room Extraction:
+  - Audited MegaBasterd reference repository (`Download.java`, `ChunkDownloader.java`, `SmartMegaProxyManager.java`, `FolderLinkDialog.java`).
+  - Extracted constants: 509 quota proxy ban window (`now + 60 minutes`, clamped between 10s and 3600s), legacy `#F!{id}@{sub_id}!{key}` subfolder syntax, and Keep/Remove selection algorithms.
+  - Verified zero Java code left behind with full deletion of `temp_megabasterd`.
+- [x] `looker-mega`:
+  - Extended `MegaLink` parser to support legacy MegaBasterd link formats:
+    * `#F!{id}!{key}` and `#F!{id}@{sub_id}!{key}` (parses `root_id = "{id}"`, `sub_folder_id = Some("{sub_id}")`, `key = "{key}"`, `is_folder = true`).
+    * `#!{id}!{key}` legacy single file format.
+    * Added `MegaLink::root_id(&self) -> &str` helper accessor.
+  - Unit tests in `crates/looker-mega/src/link.rs` and `crates/looker-mega/tests/folder_tests.rs`: verified `test_legacy_megabasterd_subfolder_link_parsing`.
+- [x] `looker-pool`:
+  - Added `mega_cooldown_until: parking_lot::RwLock<Option<Instant>>` to `ProxyItem`.
+  - Added `is_mega_cooldown(&self) -> bool`, `mark_mega_509_cooldown(&self, cooldown: Duration)`, `clear_mega_cooldown(&self)`, and `mega_cooldown_remaining_secs(&self) -> Option<u64>`.
+  - When hitting HTTP 509 or `-17`: proxy is marked on MEGA cooldown for 60 minutes without incrementing general failure strikes or evicting from general HTTP/SOCKS routing.
+  - Implemented `ProxyPool::get_mega_healthy_candidates(&self, max_candidates: usize)`: prioritizes healthy proxies that are not in MEGA cooldown.
+  - Unit test in `crates/looker-pool/src/pool.rs`: verified `test_mega_509_cooldown_does_not_evict_from_general_pool`.
+- [x] `looker-down`:
+  - Added `--mode <passive|force_proxy>` flag (default `passive`).
+  - Implemented dual-client worker architecture: direct host connection (`direct_http`) and rotating proxy gateway client (`proxy_http`).
+  - Passive Mode: Chunks download at full host ISP speed until HTTP 509 or `-17` occurs, then automatically and seamlessly switches active and remaining chunk workers to the rotating proxy gateway without losing completed chunk data.
+  - Force Proxy Mode: Chunks route through rotating gateway from byte 0.
+- [x] `looker-gateway`:
+  - Disk Space Pre-Check: Implemented `check_available_disk_space(&path, needed_bytes)` using Windows API `GetDiskFreeSpaceExW` to verify free space before allocating downloads; returns clear error if `total_selected_bytes > free_space`.
+  - Live Worker & Engine Config (`GET /api/mega/config` & `POST /api/mega/config`):
+    * `routing_mode`: "passive" vs "force_proxy"
+    * `workers_per_file`: 1 to 24 (default 6)
+    * `max_concurrent_files`: 1 to 5 (default 2)
+    * `speed_limit_mbps`: live token-bucket `RateLimiter` (0 = unlimited)
+  - Persistent Batch Queue:
+    * Persists full queue state to `%LOCALAPPDATA%\looker\queue.json` on task creation, pause, progress, and completion.
+    * On gateway startup, incomplete tasks reload in `TaskStatus::Paused` state, surviving application restarts.
+    * Implemented pause/resume with chunk bitmap tracking (`POST /api/mega/tasks/:id/pause` flushes file buffers and saves chunk bitmap; `POST /api/mega/tasks/:id/resume` resumes remaining incomplete chunks).
+    * Implemented `DELETE /api/mega/tasks/:id` removing tasks from memory and `queue.json`.
+    * Implemented `POST /api/mega/tasks/:id/open-folder` opening destination directories in OS Explorer via `opener`.
+  - Integration tests in `crates/looker-gateway/tests/retry_rule_test.rs`: verified `test_disk_space_and_config_validation` and live config endpoints.
+- [x] `looker-gateway/ui/dist/index.html`:
+  - Interactive Folder Link Modal (matching MegaBasterd's `FolderLink` workflow):
+    * Collapsible nested directory/file tree showing folder names, filenames, and formatted sizes (`formatBytes`).
+    * Multi-selection support: individual checkboxes, row click, `Ctrl+Click` (toggle), and `Shift+Click` (range selection).
+    * Live search & extension filter (`.mp4`, keyword) with `Select All` and `Deselect All`.
+    * Explicit **`KEEP THIS`** (Keep Selected) button removing all unselected/unhighlighted items.
+    * Explicit **`REMOVE THIS`** (Remove Selected) button removing all selected items and their descendant subtrees.
+    * Prominent live counter in modal header (`Selected: 14.20 GB (X / Y files)`) updating immediately.
+    * Download category pills (`General`, `Media & Video`, `Software & ISOs`, `Games`, `Archives`) and native directory picker (`Browse...`) directly inside modal.
+  - Multi-Link Inspector & Settings Bar:
+    * Multi-line textarea supporting single or multiple newline-separated MEGA URLs.
+    * Compact live settings bar: Routing Mode toggle, workers count, max concurrent files, and speed cap.
+  - Transfer Queue UI:
+    * Displays active queue items with Title, Category badge, Routing badge (`Passive Direct` vs `Proxy Gateway`), Active Workers count, Speed, ETA, and progress bar.
+    * Action buttons: `[ Pause ]`, `[ Resume ]`, `[ Cancel ]`, `[ Open Folder ]`, and `[ Delete ]`.
+- [x] Full workspace verification: 37 tests green across all crates, `cargo check -p looker-app` clean.
+
+### Phase 14: Power-User Settings Suite (Clipboard Monitor, Slot Proxy Rotation, Stall Watchdog, Automation Hooks, and Settings Import/Export)
+- [x] `looker-gateway` Settings Schema & REST Endpoints:
+  - Created strongly typed `AppSettings` struct persisted to `%LOCALAPPDATA%\looker\settings.json` with 18 fields:
+    * `default_download_dir`: OS `Downloads/Looker` fallback.
+    * `temp_chunk_dir`: Option<String> optional staging directory for `.part` files before moving to final destination.
+    * `max_parallel_downloads`: 1..=10 (default 3).
+    * `slots_per_file`: 1..=24 (default 6).
+    * `speed_limit_kbps`: u64 (0 = unlimited).
+    * `verify_cbc_mac`: bool (default true - verifies in-flight and on-disk chunk condensation against expected `[k6, k7]`).
+    * `clipboard_monitor`: bool (default false).
+    * `auto_accept_folders`: bool (default false - auto-queues immediately without modal).
+    * `freeze_before_start`: bool (default false - queues tasks in `Paused` state).
+    * `routing_mode`: "passive" | "force_proxy" (default "passive").
+    * `sticky_509_seconds`: u64 (default 3600 - holds proxy fallback for N seconds after host connection 509).
+    * `proxy_selection_order`: "sequential" | "random" (default "sequential").
+    * `reset_proxy_per_chunk`: bool (default true - acquires fresh proxy node per slot chunk so slots never stall on slow nodes).
+    * `proxy_ban_seconds`: u64 (default 300 - cooldown duration on proxy error; 0 = permanent failure).
+    * `stall_watchdog_seconds`: u64 (default 90 - streams chunk body with per-read timeout; drops stalled connection, cools down proxy, and retries chunk).
+    * `upstream_proxy`: Option<String> for all outbound requests.
+    * `cmd_on_509_limit`: Option<String> shell command executed on 509 limit (debounced once per 509 window).
+    * `cmd_on_all_finished`: Option<String> shell command executed when active queue reaches 0 downloading tasks.
+  - Exposed REST endpoints:
+    * `GET /api/settings` -> returns current `AppSettings` JSON.
+    * `POST /api/settings` -> validates, updates in-memory config, updates rate limiter, and saves `%LOCALAPPDATA%\looker\settings.json`.
+    * `POST /api/settings/reset` -> restores factory defaults and persists.
+- [x] `looker-pool` Proxy Selection Enhancements:
+  - Implemented `ProxyPool::get_mega_healthy_candidates_ordered(&self, max_candidates: usize, order: &str) -> Vec<Arc<ProxyItem>>`:
+    * `"sequential"`: ranks lowest latency first.
+    * `"random"`: shuffles healthy non-509 nodes for even distribution.
+- [x] `looker-gateway` Engine Integration:
+  - Integrated `AppSettings` into `DownloadManager` with live synchronization to `DownloaderConfig` and `RateLimiter`.
+  - Implemented sticky 509 timer tracking (`last_host_509_at`), routing chunks directly through proxies during sticky window.
+  - Implemented per-chunk proxy rotation (`reset_proxy_per_chunk`) and slot candidate selection ordering.
+  - Implemented stall watchdog streaming timeout (`stall_watchdog_seconds`) with `proxy_ban_seconds` cooldown and retry.
+  - Implemented CBC-MAC integrity verification via `FileMacAccumulator` over on-disk chunk data.
+  - Implemented temp chunk staging directory (`temp_chunk_dir`) with atomic rename/copy to target path upon successful validation.
+  - Implemented shell command execution hooks via `tokio::process::Command` for 509 limits and queue completion.
+- [x] `looker-gateway/ui/dist/index.html` Settings Drawer UI & Clipboard Monitor:
+  - Added Settings gear button in top header bar next to gateway status pill.
+  - Clean obsidian/emerald modal with 3 organized tabs:
+    * Tab 1: **Downloads & Automation** (Folders, max files, slots, speed cap, CBC-MAC verify, clipboard monitor, auto-accept, freeze before start).
+    * Tab 2: **SmartProxy & Routing** (Routing mode, selection order, reset per chunk, sticky 509 window, error ban time, stall watchdog, upstream proxy).
+    * Tab 3: **Hooks & Backup** (Command on 509, command on all finished, Export JSON, Import JSON, Reset Defaults).
+  - Clipboard Monitor: polls `navigator.clipboard.readText()` on window focus and interval for modern and legacy `mega.nz` URLs; auto-queues if `auto_accept_folders` is enabled, otherwise populates and opens the folder modal.
+- [x] Full workspace verification: 40 tests green across all crates, `cargo check -p looker-app` clean.
+
+### Phase 15: Chunk Stall Watchdog Fix, Live Rust Debug Console, and Complete Desktop UI/UX & Typography Overhaul
+- [x] Strict Per-Read Stall Timeout on Chunk Streams (`looker-mega`, `looker-gateway`, `looker-down`):
+  - Configured all HTTP/reqwest clients with explicit `connect_timeout(Duration::from_secs(8))` and `read_timeout(Duration::from_secs(15))` (or `stall_watchdog_seconds`).
+  - Wrapped every `response.chunk().await` inside `tokio::time::timeout(watchdog_timeout, response.chunk())`.
+  - When a chunk read times out or delivers 0 bytes within the watchdog window:
+    * Immediately drop the stalled HTTP stream and close the underlying socket.
+    * Logged detailed warning via `tracing::warn!` including file name, chunk index, byte offset, and stalled proxy endpoint.
+    * Applied proxy cooldown ban (`proxy_ban_seconds`, default 300s) to mark the dead proxy so other workers skip it.
+    * Re-queued the exact chunk onto a fresh proxy candidate without losing previously written chunks.
+- [x] Automatic MEGA Temporary URL (`gfs`) Refresh & Speed Decay:
+  - Implemented `refresh_file_download_url(folder_handle, file_handle)` in `looker-mega::api`.
+  - When hitting HTTP 403, HTTP 509, or 3 consecutive chunk timeouts/errors, invalidates cached storage URL and queries `g.api.mega.co.nz/cs` (`a: "g"`) for a fresh storage URL.
+  - Live download speed decays cleanly to `0.0 MB/s` within 2 seconds when no bytes arrive, avoiding frozen stale speed displays.
+  - If all proxies in `ProxyPool` are temporarily on 509 cooldown or banned, logs `All proxies cooling down, waiting 10s before retrying...` and surfaces `cooling_down` status on the task row without spinning a tight CPU loop.
+- [x] Decrypted Folder Title Preservation in Queue:
+  - Updated `looker-mega::folder` to decrypt root node attributes using the folder share key directly when `unwrap_node_key` fails, exposing `tree.root_title()`.
+  - Updated `POST /api/mega/download` and `start_download` to accept `title: Option<String>` and default to `tree.root_title()`, ensuring queue cards and destination directories preserve the decrypted name (e.g. `RRTVP017`) instead of `Folder_<id>`.
+- [x] In-Memory Rust Tracing Buffer & Gateway Endpoints (`looker-gateway`, `looker-app`, `looker-proxy`):
+  - Created `looker_gateway::logging`:
+    * `DebugLogEntry`: `{ timestamp, level, target, message }`.
+    * `LogBuffer`: thread-safe ring buffer (`Arc<RwLock<VecDeque<DebugLogEntry>>>`) capped at 2,000 entries.
+    * `LogBufferLayer`: custom `tracing_subscriber::Layer` installed in `looker-app` and `looker-proxy`.
+  - Endpoints:
+    * `GET /api/debug/logs?limit=300` -> returns latest log entries as JSON.
+    * `POST /api/debug/clear` -> clears in-memory log buffer.
+    * `POST /api/system/open-devtools` -> triggers webview devtools in Tauri shell.
+    * `POST /api/proxies/import` -> manually imports and registers proxy list into active pool.
+  - Enabled `"devtools"` feature in `looker-app/Cargo.toml` and bound `F12` / `Ctrl+Shift+I` to open devtools even in release builds.
+- [x] Non-Generic Desktop UI/UX & Typography Overhaul (`looker-gateway/ui/dist/index.html`):
+  - Typography Scale: Replaced generic fonts with **Plus Jakarta Sans** (headings, buttons, UI) and **IBM Plex Mono** (endpoints, speeds, file sizes, logs).
+  - Enforced strict minimum font size: `12px` (`text-xs`) metadata and `14px` (`text-sm`) standard text. Removed all microscopic `9px`, `10px`, `11px` text across the entire interface.
+  - Applied `font-variant-numeric: tabular-nums` to all live counters, percentages, speeds, latencies, and timers.
+  - Clean Desktop Architecture:
+    * Palette: Canvas `#0c0d10`, Surface `#13151a`, Panel `#181b22`, subtle borders `rgba(255,255,255,0.07)`, primary text `#f1f3f5`, secondary text `#8b929e`, restrained emerald `#10b981`.
+    * Compact Top Bar with app brand, live status (`Online · N proxies`), segmented view switcher tabs (**`Downloader`** and **`Proxy Pool`**), Settings button, Debug dropdown (`Toggle Live Console`, `Toggle DevTools`, `Save Debug Log`), and Export dropdown (`all.txt`, `socks5.txt`, `socks4.txt`, `http.txt`, `Import Proxies...`).
+    * View 1 (Downloader Workspace): spacious URL textarea, prominent 44px `Inspect Links` button, Transfer Controls strip, spacious queue cards with decrypted titles, thick progress bars, live speeds, and control buttons.
+    * View 2 (Proxy Pool Workspace): 4-card telemetry strip, Fastest Nodes list, and searchable protocol-filtered Surviving Proxy Pool table.
+    * Slide-Up Live Debug Console (`Ctrl+Shift+D`): bottom terminal drawer polling `/api/debug/logs`, with level badges, keyword search, auto-scroll, Copy, and Clear.
+- [x] Full workspace verification: 40 tests green across all crates, `cargo check -p looker-app` clean.
+
+### Phase 16: Multi-File Folder Deadlock Fix, Task State Drop-Guard, and Decrypted Folder Naming
+- [x] Multi-File Folder Deadlock Resolution (`looker-gateway`):
+  - Fixed coordinator/worker channel coordination in `download_single_file`:
+    * Separated chunk work queue from chunk result channel (`ChunkResult::Success`, `ChunkResult::Failed`).
+    * Explicitly dropped coordinator-owned `Sender` instances (`work_tx`, `result_tx`) before awaiting `result_rx.recv().await`.
+    * Deterministically terminated the collection loop as soon as `completed_chunks == total_chunks`, triggering `file_cancel.cancel()` to cleanly terminate idle worker tasks.
+    * Eliminated all `tokio::sync::RwLock` and `Mutex` guard holding across `.await` points in `save_queue_from_tasks`, `open_task_folder`, `list_tasks`, and worker loops.
+    * Ensured shared file handles (`tokio::fs::File`) are explicitly flushed (`f.flush().await`) and dropped at the end of each file before CBC-MAC verification and moving to subsequent files in folder downloads.
+  - Added clear lifecycle tracing logs at every file boundary inside folder transfers:
+    * `Starting file [X/N]: '<filename>' (<bytes> bytes, <chunks> chunks)`
+    * `Fetching storage URL for '<filename>'...`
+    * `Finalizing file '<filename>'...`
+    * `Completed file [X/N]: '<filename>'`
+    * `Folder transfer '<folder_name>' completed (N/N files)`
+  - Added explicit error handling and error logging (`tracing::error!`) on storage URL resolution (`gfs`) and file transfers, cleanly transitioning tasks to `Failed` instead of silently hanging.
+- [x] Task Execution Drop-Guard (`looker-gateway`):
+  - Implemented `TaskDropGuard` wrapping the spawned background task in `spawn_task_worker`.
+  - If a task future exits prematurely, encounters an unhandled error, or panics while in `TaskStatus::Downloading`, `TaskDropGuard` automatically catches it in `drop()`, transitions `task.status` to `TaskStatus::Failed`, resets `speed_mbps = 0.0`, `eta_seconds = 0`, and `active_workers = 0`, recording the error reason.
+  - Exported `pub type DownloadStatus = TaskStatus;`.
+- [x] Decrypted Folder Title & Filesystem Sanitization (`looker-mega` & `looker-gateway`):
+  - Implemented `sanitize_folder_name` stripping Windows/cross-platform forbidden characters (`<>:"/\|?*` and control chars) and trimming trailing dots and whitespace.
+  - Enhanced `looker-mega::folder::parse_folder_tree` to fall back to `folder_share_key` attribute decryption for folder nodes when `unwrap_node_key` yields an invalid attribute key, and set root folder relative path to empty `PathBuf` preventing duplicate nested directories.
+  - Enhanced `MegaFolderTree::root_title()` to accurately detect decrypted root node names and top-level directory names.
+  - Updated `POST /api/mega/inspect`, `POST /api/mega/download`, and `run_download_task` to prioritize and sanitize decrypted folder titles as both the task title and the target filesystem directory name instead of generic `Folder_<id>`.
+- [x] Unit & Integration Tests:
+  - Added `crates/looker-gateway/tests/folder_download_test.rs`:
+    * `test_multi_file_folder_download_completion`: simulates multi-file folder download with 2 files (2 chunks each) over mock HTTP chunk server, verifying File #1 completes, File #2 starts and completes, decrypted contents match on disk, and the task transitions cleanly to `Completed`.
+    * `test_task_drop_guard_failure_transition`: verifies drop guard transitions unexpectedly dropped tasks from `Downloading` to `Failed` with 0 speed and recorded error.
+    * `test_task_drop_guard_clean_completion_preserves_status`: verifies completed tasks remain `Completed`.
+    * `test_sanitize_folder_name`: tests invalid Windows character stripping and formatting.
+- [x] Full workspace verification: 44 tests green across all crates, `cargo check -p looker-app` clean.
+
+### Phase 17: Production Release Hardening & GitHub Launch (v0.1.0 - x7sss)
+- [x] UI Copy & Layout Cleanup:
+  - Simplified window title in `crates/looker-app/src/main.rs`, `tauri.conf.json`, and `crates/looker-gateway/ui/dist/index.html` to simply "Looker".
+  - Cleaned up Downloader view header: stripped "MEGA Downloader Studio", green "QUOTA-BYPASS ENGINE" badge, and long technical cipher subtitle; established clean, direct "MEGA Links" label above input.
+  - Streamlined Settings modal header to "Settings" (removed "Power-User" prefix, "SUITE" badge, and subtitle).
+  - Clarified settings field labels: "Verify file integrity", "Fastest first", "Command on 509 limit", and "Backup & Reset".
+  - Replaced bottom footer bar with minimal: "Looker v0.1.0 · MIT License · github.com/x7ssss/looker" linking to https://github.com/x7ssss/looker.
+- [x] License & Cargo Workspace Metadata:
+  - Created root `LICENSE` file containing standard MIT License with `Copyright (c) 2026 x7sss`.
+  - Updated root `Cargo.toml` `[workspace.package]` with author `["x7sss"]`, `license = "MIT"`, `repository = "https://github.com/x7ssss/looker"`, `homepage = "https://github.com/x7ssss/looker"`, and production description.
+- [x] Production Hardening & CSRF Protection:
+  - Removed `"devtools"` feature from release dependencies in `crates/looker-app/Cargo.toml`; scoped F12 WebView2 DevTools invocation strictly to debug builds (`#[cfg(debug_assertions)]`).
+  - Preserved built-in Live Debug Console drawer (`Ctrl+Shift+D` and Debug dropdown) in production release builds for live chunk tracing and diagnostic log export.
+  - Enforced strict `127.0.0.1` binding in `ProxyGateway` (never `0.0.0.0` or external network adapters).
+  - Implemented CSRF / Cross-Origin middleware guard on all `/api/*` routes in `crates/looker-gateway/src/server.rs`, rejecting requests with external `Origin` or `Referer` headers (`403 Forbidden`) while permitting missing headers and local loopback/Tauri origins.
+- [x] Original Production README.md:
+  - Created sharp, production-ready, completely original `README.md` highlighting autonomous proxy harvesting across 52 feeds, passive 509 failover & force proxy modes, in-flight AES-128-CTR decryption, CBC-MAC validation, interactive folder pruning, persistent queue, and troubleshooting stalled transfers.
+  - Included direct links to latest release installer (`Looker-Setup-x64.exe`), build-from-source guides, and acknowledgments to `tonikelope/megabasterd` and `monosans/proxy-scraper-checker`.
+- [x] GitHub Actions CI/CD Workflow (`.github/workflows/release.yml`):
+  - Configured triggers on version tags (`v*`) and `workflow_dispatch`.
+  - Added `cargo test --workspace` run on `windows-latest` prior to release artifact packaging.
+  - Standardized Tauri CLI v2 installation and NSIS setup packaging as `Looker-Setup-x64.exe` for GitHub Releases via `softprops/action-gh-release`.
+- [x] Full Workspace Verification:
+  - 45 tests pass cleanly across all crates (including new `test_api_csrf_origin_guard_and_strict_bind`).
+  - Production release build `cargo build --release -p looker-app` compiles cleanly without warnings or release devtools.
+  - Project marked 100% production-ready for v0.1.0 public release.
+
 ---
 
 ## 5. Session Instructions for Future Agents

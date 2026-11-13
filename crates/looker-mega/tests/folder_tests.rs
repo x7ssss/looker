@@ -56,6 +56,17 @@ fn test_folder_link_parsing() {
 }
 
 #[test]
+fn test_legacy_megabasterd_subfolder_link_parsing() {
+    let url = "https://mega.nz/#F!HqJUnY4J@fzxBDZKC!lBStkttzdoYm7HA0M13nmg";
+    let link = MegaLink::parse(url).expect("Should parse legacy MegaBasterd subfolder link");
+    assert_eq!(link.root_id(), "HqJUnY4J");
+    assert_eq!(link.handle, "HqJUnY4J");
+    assert_eq!(link.sub_folder_id, Some("fzxBDZKC".to_string()));
+    assert_eq!(link.key, "lBStkttzdoYm7HA0M13nmg");
+    assert!(link.is_folder);
+}
+
+#[test]
 fn test_folder_share_key_parsing() {
     // 16 bytes encoded with Base64URL without padding = 22 chars
     let raw_key = b"0123456789abcdef";

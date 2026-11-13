@@ -2254,6 +2254,8 @@ dependencies = [
  "looker-mega",
  "looker-pool",
  "looker-protocol",
+ "opener",
+ "parking_lot",
  "reqwest 0.12.28",
  "rfd",
  "rust-embed",
@@ -2264,6 +2266,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

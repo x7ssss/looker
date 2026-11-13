@@ -56,6 +56,10 @@ jobs:
         if: matrix.use_cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
+      - name: Run workspace tests (Windows)
+        if: matrix.os == 'windows-latest'
+        run: cargo test --workspace
+
       - name: Build release binaries (cross)
         if: matrix.use_cross
         run: cross build --release --target ${{ matrix.target }} -p looker-proxy -p looker-down
@@ -141,7 +145,7 @@ jobs:
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'tags/v')
+        if: startsWith(github.ref, 'tags/v') || github.event_name == 'workflow_dispatch'
         with:
           files: dist-all/*
           generate_release_notes: true

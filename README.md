@@ -1,154 +1,86 @@
-<div align="center">
+# Looker - Native Rust Proxy Harvester, Local Gateway & Multi-Slot MEGA Downloader
 
-# Looker: High-Speed Rotating Proxy Infrastructure & Native MEGA Engine
+> A self-contained Windows desktop app that scrapes and validates thousands of public proxies in the background and uses them to bypass MEGA transfer quota walls automatically.
 
-**Next-generation, zero-install rotating proxy daemon and ultra-fast, quota-bypassing MEGA.nz downloader engineered in 100% memory-safe, clean-room Rust.**
-
-[![Rust 1.80+](https://img.shields.io/badge/rust-1.80+-orange.svg)](https://www.rust-lang.org)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
-[![Zero-Copy Architecture](https://img.shields.io/badge/Zero--Copy-MaxMind%20%26%20Raw%20Sockets-success.svg)](#critical-system-invariants)
-
-</div>
+[![Release](https://img.shields.io/github/v/release/x7ssss/looker?color=emerald)](https://github.com/x7ssss/looker/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%20(x64)-informational.svg)](https://github.com/x7ssss/looker/releases/latest)
+[![Rust: 1.80+](https://img.shields.io/badge/Rust-1.80+-orange.svg)](https://www.rust-lang.org)
 
 ---
 
-## ⚡ The Consumption Gap: Why Looker?
+## Installation
 
-Existing proxy scrapers (such as `monosans/proxy-scraper-checker`) do a fine job of dumping static lists of thousands of raw IP addresses into text files (`http.txt`, `socks5.txt`). However, **static lists leave a massive consumption gap**:
+Download the latest installer from the official release page:
 
-```
-[ Scraper Dumps Text File ] ──> ??? (Manual configuration, dead IP failures, stalled downloads) ──> Application
-```
+📥 **[Download Looker-Setup-x64.exe (Windows x64)](https://github.com/x7ssss/looker/releases/latest)**
 
-Applications and tools cannot consume a text file of 5,000 raw proxies without building their own connection pools, health checkers, protocol negotiation, and failover handlers. Looker bridges this gap by turning public proxies into a **living, local, transparent gateway daemon**.
-
-| Feature | Legacy Scrapers (e.g. `monosans/proxy-scraper-checker`) | **Looker (`looker-proxy` + `looker-gateway`)** |
-| :--- | :--- | :--- |
-| **Output Model** | Static text dumps (`http.txt`, `socks5.txt`) | **Live local rotating HTTP CONNECT gateway at `127.0.0.1:8080`** |
-| **Application Integration** | Requires custom proxy rotation logic in every client tool | **Zero-config: `ALL_PROXY=http://127.0.0.1:8080 curl/looker-down`** |
-| **In-Flight Failover** | None: dead proxy causes connection drop in client | **Pre-Commit Retry Rule: Gateway retries 3–5 proxies before sending `200 OK`** |
-| **Protocol Support** | Separate checks for HTTP, SOCKS4, SOCKS5 | **Unified multi-protocol proxy pool with protocol auto-negotiation** |
-| **GeoIP & ASN Resolution** | Often slow web API queries or missing | **Zero-copy memory-mapped offline MaxMind GeoLite2 resolver** |
-| **Circuit Breakers** | None: dead proxies are retried repeatedly until re-scraped | **Lock-free atomic circuit breakers with exponential backoff** |
-| **Latency Tracking** | Snapshot ping at scan time | **Dynamic Exponential Moving Average (EMA) latency ranking** |
+Looker runs as a single native binary powered by Rust and Windows WebView2. No Java Runtime Environment (JRE), Python runtime, or manual proxy list juggling required. Simply run the installer and launch Looker.
 
 ---
 
-## 🚀 Native Performance: looker-down vs. Legacy Java Downloaders
+## Key Capabilities
 
-Legacy tools such as **MegaBasterd** pioneered proxy-based quota bypassing for MEGA.nz, but they suffer from severe JVM bottlenecks:
-
-- **JVM Bloat & Heavy RAM Footprint:** Java downloaders frequently consume 500 MB – 2 GB of memory, causing garbage collection pauses and high CPU load during intensive parallel transfers.
-- **GUI Lockups & Freezes:** Swing/JavaFX graphical interfaces frequently become unresponsive under high I/O throughput.
-- **Memory Leaks during Long Runs:** Complex object graphs and chunk buffers degrade system performance over multi-gigabyte transfers.
-- **Dependency Overhead:** Requires installing and configuring a full Java Runtime Environment (JRE).
-
-### The Looker Solution (`looker-down`)
-- **Zero-Install Single Binary:** Compiled to a tiny native binary with no runtime dependencies.
-- **Negligible Footprint:** Operates smoothly under 20–30 MB of RAM with zero garbage collection overhead.
-- **Native Cryptographic Acceleration:** Uses hardware-accelerated AES-NI instructions for AES-128-CTR stream decryption and chunk CBC-MAC integrity verification.
-- **Non-Blocking Async I/O:** Powered by Tokio and asynchronous raw TCP pipelines for wire-speed network saturation.
+- **Autonomous Proxy Engine:** Automatically pulls candidates from 52 verified public proxy feeds, validates up to 500 sockets concurrently with low-overhead TCP handshakes, seeds surviving nodes from previous sessions on boot, and exposes live local feeds (`http://127.0.0.1:8080/all.txt`, `socks5.txt`, `socks4.txt`, `http.txt`) for external tools.
+- **Passive 509 Failover & Force Proxy Modes:** By default (Passive Mode), downloads stream directly over your primary connection at full ISP line speed. The instant MEGA returns an HTTP 509 bandwidth quota limit, Looker seamlessly fails active and remaining chunk workers over to verified rotating proxy nodes with per-IP cooldown tracking. Force Proxy mode routes all chunks through proxy nodes from byte zero.
+- **In-Flight Decryption & Integrity Checks:** Streams and decrypts AES-128-CTR chunks directly into sparse destination files on disk without creating temporary chunk fragments. Supports optional cryptographic CBC-MAC checksum condensation to verify byte integrity against file keys on completion.
+- **Interactive Folder Pruning & Persistent Queue:** Inspects modern (`/folder/{id}#{key}`) and legacy (`#F!{id}!{key}`) folder links, presenting an interactive folder hierarchy to selectively keep or remove specific files and subdirectories before downloading. All queue states, progress, and paused tasks survive application restarts.
 
 ---
 
-## 🏛️ System Architecture
+## Troubleshooting Stalled Transfers
 
-```
-                       +---------------------------------------+
-                       |        Public Proxy Feeds             |
-                       |  (ProxyScrape, Monosans, TheSpeedX..) |
-                       +-------------------+-------------------+
-                                           |
-                                    looker-scraper
-                        (Async fetch, regex, bogon filter)
-                                           |
-                                           v
-+------------------+              +------------------+
-| looker-geo       | ---------->  | looker-pool      | <------- looker-protocol
-| (MaxMind mmdb    |   (Geo/ASN)  | (Registry, CB,   |  (Raw SOCKS4/5/HTTP probe)
-|  zero-copy mmap) |              |  latency ranking)|
-+------------------+              +--------+---------+
-                                           |
-                                           v
-                                  looker-gateway
-                      (127.0.0.1:8080, Pre-Commit Retry Engine)
-                                           ^
-                                           |  (HTTP CONNECT tunnels)
-                                           |
-                                  looker-down CLI
-                           (Parallel chunk downloader)
-                                           |
-                                           v
-                                     looker-mega
-                        (Key derivation, AES-CTR, CBC-MAC)
-```
+If a download or chunk worker appears to stall:
+
+1. **Initial Proxy Validation Sweep:** When launching Looker fresh without cached proxies, allow 30–60 seconds for the background validation sweep to finish testing public sources and populate a pool of healthy SOCKS5 and HTTP proxies. You can monitor pool progress in the **Proxy Pool** tab or top status bar.
+2. **Lowering Proxy Validation Concurrency:** On consumer-grade routers, testing 500 sockets simultaneously can saturate local NAT state tables. If your internet connection stutters during scrapes, reduce the checker concurrency in Settings.
+3. **Windows Firewall Outbound Rules:** Ensure Looker has permission to establish outbound connections on non-standard ports (such as `1080`, `8080`, `3128`, `8888`), which public SOCKS/HTTP proxies utilize.
+4. **Live Debug Console (Ctrl+Shift+D):** Press `Ctrl+Shift+D` (or choose **Debug -> Toggle Live Console** in the top bar) to open the built-in terminal drawer. This displays live chunk allocation, storage URL renewals (`gfs`), proxy cooldown events, and stall watchdog retries in real time. You can export logs directly via the **Save Debug Log** button.
 
 ---
 
-## 🛠️ Workspace Crates
+## Build from Source
 
-| Crate | Path | Description |
-| :--- | :--- | :--- |
-| **`looker-protocol`** | [`crates/looker-protocol`](file:///crates/looker-protocol) | Raw byte-level SOCKS4/5 & HTTP CONNECT handshakes on `TcpStream`. |
-| **`looker-geo`** | [`crates/looker-geo`](file:///crates/looker-geo) | Zero-copy offline MaxMind GeoLite2 reader via `memmap2`. |
-| **`looker-scraper`** | [`crates/looker-scraper`](file:///crates/looker-scraper) | Async public proxy collector, multi-format extractor, bogon filter. |
-| **`looker-pool`** | [`crates/looker-pool`](file:///crates/looker-pool) | Thread-safe proxy registry, atomic circuit breakers, latency ranking. |
-| **`looker-gateway`** | [`crates/looker-gateway`](file:///crates/looker-gateway) | Local `127.0.0.1:8080` rotating proxy listener with pre-commit retries. |
-| **`looker-mega`** | [`crates/looker-mega`](file:///crates/looker-mega) | MEGA.nz API client, key derivation, AES-128-CTR decryption, CBC-MAC. |
-| **`looker-proxy`** | [`crates/looker-proxy`](file:///crates/looker-proxy) | Daemon & CLI binary: scraper + pool + gateway + file exporter. |
-| **`looker-down`** | [`crates/looker-down`](file:///crates/looker-down) | Native CLI downloader: parallel chunking through local gateway. |
-| **`looker-app`** | [`crates/looker-app`](file:///crates/looker-app) | Native desktop shell & Windows system tray daemon (Tauri v2). |
+### Prerequisites
+- [Rust 1.80+](https://rustup.rs/) (stable toolchain)
+- Microsoft Visual C++ (MSVC) Build Tools
 
----
-
-## 🚦 Quickstart Guide
-
-### 1. Native Windows Desktop Installer
-Download and run the standalone **`Looker_x64-setup.exe`** from GitHub Releases:
-- Runs as a clean native desktop shell with system tray background persistence.
-- Closing or minimizing the window keeps the rotating proxy gateway running at `http://127.0.0.1:8080`.
-- System tray context menu provides one-click access to "Show Looker", "Open live.txt", and clean shutdown.
-
-### 2. Build from Source
-Ensure you have a recent Rust toolchain installed (1.80+):
-```bash
-git clone https://github.com/looker-rs/looker.git
+### Building
+```powershell
+# Clone repository
+git clone https://github.com/x7ssss/looker.git
 cd looker
+
+# Run complete workspace test suite
+cargo test --workspace
+
+# Build optimized release CLI binaries (looker-proxy, looker-down)
 cargo build --release
+
+# Build native desktop application and NSIS installer
+cd crates/looker-app
+cargo install tauri-cli --version "^2.0.0" --locked
+cargo tauri build --bundles nsis
 ```
 
-### 3. Start the Rotating Proxy Gateway Daemon (CLI)
-Launch the background proxy aggregator, embedded web dashboard, and gateway listener on `127.0.0.1:8080`:
-```bash
-./target/release/looker-proxy daemon --bind 127.0.0.1:8080 --scrape-interval 300
-```
-
-- **Web Dashboard:** Open [`http://127.0.0.1:8080/ui`](http://127.0.0.1:8080/ui) in any browser for live pool metrics, latency graphs, node health, and one-click downloader commands.
-- **Live Proxy Feed:** [`http://127.0.0.1:8080/live.txt`](http://127.0.0.1:8080/live.txt)
-- **Dedicated Protocol Feeds:** [`/socks5.txt`](http://127.0.0.1:8080/socks5.txt), [`/socks4.txt`](http://127.0.0.1:8080/socks4.txt), [`/http.txt`](http://127.0.0.1:8080/http.txt)
-- **JSON Pool Stats:** [`http://127.0.0.1:8080/status`](http://127.0.0.1:8080/status)
-
-Verify the proxy gateway via command-line:
-```bash
-curl -x http://127.0.0.1:8080 https://api.ipify.org
-```
-
-### 4. Download Files & Entire Public Folders from MEGA (CLI or Web UI)
-Download any public MEGA file or entire folder tree at wire speed through the rotating gateway:
-```bash
-# Download a single file:
-./target/release/looker-down "https://mega.nz/file/xxxx#yyyy" -o output.bin --workers 16
-
-# Download a complete folder tree (recursively recreates directory structure):
-./target/release/looker-down "https://mega.nz/folder/xxxx#yyyy" -o ./downloads/ --workers 16
-```
+The resulting standalone executable and setup wizard will be generated in `target/release/bundle/nsis/`.
 
 ---
 
-## 🔒 License
+## Acknowledgments
 
-Licensed under either of:
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+Looker builds upon concepts pioneered by the open-source community:
+- [tonikelope/megabasterd](https://github.com/tonikelope/megabasterd) - Inspiration for the SmartProxy 509 failover mechanism, chunk slot rotation, and folder link parsing.
+- [monosans/proxy-scraper-checker](https://github.com/monosans/proxy-scraper-checker) - Inspiration for curated public proxy feed aggregation and concurrent socket validation patterns.
 
-at your option.
+---
+
+## Disclaimer
+
+Looker is an independent open-source network utility created for research, testing, and backup purposes. It is provided "as is" under the MIT License without warranties of any kind. Looker is not affiliated with, endorsed by, or associated with MEGA Limited or any of its subsidiaries. Users are solely responsible for complying with MEGA's Terms of Service and applicable local laws in their jurisdiction.
+
+---
+
+## License
+
+Copyright (c) 2026 x7sss. Distributed under the [MIT License](LICENSE).

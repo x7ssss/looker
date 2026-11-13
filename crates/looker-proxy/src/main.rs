@@ -100,13 +100,17 @@ fn init_geo_resolver(city_db: Option<&Path>, asn_db: Option<&Path>) -> Arc<GeoRe
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::registry()
+    let log_buffer = looker_gateway::global_log_buffer().clone();
+    let buffer_layer = looker_gateway::LogBufferLayer::new(log_buffer);
+
+    let _ = tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "looker=info,looker_proxy=info,looker_gateway=info,looker_scraper=info".into()),
+                .unwrap_or_else(|_| "looker=info,looker_proxy=info,looker_gateway=info,looker_scraper=info,looker_mega=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
-        .init();
+        .with(buffer_layer)
+        .try_init();
 
     let cli = Cli::parse();
 

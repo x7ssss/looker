@@ -66,8 +66,19 @@ pub struct ProxyGateway {
 }
 
 impl ProxyGateway {
-    pub fn new(config: GatewayConfig, pool: Arc<ProxyPool>) -> Self {
-        let download_mgr = Arc::new(DownloadManager::new(config.bind_addr.to_string()));
+    pub fn new(mut config: GatewayConfig, pool: Arc<ProxyPool>) -> Self {
+        // Enforce strict 127.0.0.1 binding (never bind to 0.0.0.0 or external interfaces)
+        if !config.bind_addr.ip().is_loopback() {
+            warn!(
+                "Configured gateway bind address {} is not loopback. Enforcing strict 127.0.0.1 binding.",
+                config.bind_addr
+            );
+            config.bind_addr.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        }
+        let download_mgr = Arc::new(DownloadManager::new(
+            config.bind_addr.to_string(),
+            Arc::clone(&pool),
+        ));
         Self {
             config,
             pool,
@@ -90,7 +101,15 @@ impl ProxyGateway {
         &self,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<(), GatewayError> {
-        let listener = TcpListener::bind(self.config.bind_addr).await?;
+        let mut bind_addr = self.config.bind_addr;
+        if !bind_addr.ip().is_loopback() {
+            warn!(
+                "Configured gateway bind address {} is not loopback. Enforcing strict 127.0.0.1 binding.",
+                bind_addr
+            );
+            bind_addr.set_ip(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)));
+        }
+        let listener = TcpListener::bind(bind_addr).await?;
         let local_addr = listener.local_addr()?;
         info!("Looker proxy gateway listening on http://{}", local_addr);
         self.run_on_listener_with_cancellation(listener, cancel_token).await
@@ -107,6 +126,13 @@ impl ProxyGateway {
         listener: TcpListener,
         cancel_token: tokio_util::sync::CancellationToken,
     ) -> Result<(), GatewayError> {
+        let local_addr = listener.local_addr()?;
+        if !local_addr.ip().is_loopback() {
+            return Err(GatewayError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("Gateway listener rejected non-loopback bind address {}", local_addr),
+            )));
+        }
         let tracker = tokio_util::task::TaskTracker::new();
 
         loop {
@@ -158,6 +184,47 @@ pub fn configure_tcp_socket(stream: &TcpStream, buf_size: usize) {
     let _ = sock.set_tcp_keepalive(&keepalive);
 }
 
+/// Checks whether an Origin header is permitted to access local /api/* endpoints.
+/// Strictly permits only missing origin, loopback variants (127.0.0.1, localhost), or Tauri shell.
+pub fn is_allowed_origin(origin: &str, bound_addr: Option<SocketAddr>) -> bool {
+    let clean = origin.trim().trim_end_matches('/');
+    if clean.eq_ignore_ascii_case("http://127.0.0.1:8080")
+        || clean.eq_ignore_ascii_case("http://localhost:8080")
+        || clean.eq_ignore_ascii_case("tauri://localhost")
+    {
+        return true;
+    }
+    if let Some(addr) = bound_addr {
+        if clean.eq_ignore_ascii_case(&format!("http://{}", addr))
+            || clean.eq_ignore_ascii_case(&format!("http://127.0.0.1:{}", addr.port()))
+            || clean.eq_ignore_ascii_case(&format!("http://localhost:{}", addr.port()))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Checks whether a Referer header is permitted to access local /api/* endpoints.
+pub fn is_allowed_referer(referer: &str, bound_addr: Option<SocketAddr>) -> bool {
+    let clean = referer.trim();
+    if clean.starts_with("http://127.0.0.1:8080")
+        || clean.starts_with("http://localhost:8080")
+        || clean.starts_with("tauri://localhost")
+    {
+        return true;
+    }
+    if let Some(addr) = bound_addr {
+        if clean.starts_with(&format!("http://{}", addr))
+            || clean.starts_with(&format!("http://127.0.0.1:{}", addr.port()))
+            || clean.starts_with(&format!("http://localhost:{}", addr.port()))
+        {
+            return true;
+        }
+    }
+    false
+}
+
 async fn handle_client(
     mut client_stream: TcpStream,
     client_addr: SocketAddr,
@@ -201,6 +268,42 @@ async fn handle_client(
         Some((p, q)) => (p, Some(q)),
         None => (path_or_target, None),
     };
+
+    let local_addr = client_stream.local_addr().ok();
+
+    // CSRF & Cross-Origin Middleware Guard:
+    // Reject any request to /api/* that has an external Origin or Referer header.
+    // Prevents malicious third-party websites from executing local commands or accessing settings.
+    if req_path.starts_with("/api/") {
+        let mut external_origin_or_referer = false;
+        for line in header_str.lines() {
+            let lower = line.to_ascii_lowercase();
+            if let Some(val) = lower.strip_prefix("origin:") {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() && !is_allowed_origin(trimmed, local_addr) {
+                    external_origin_or_referer = true;
+                    break;
+                }
+            } else if let Some(val) = lower.strip_prefix("referer:") {
+                let trimmed = val.trim();
+                if !trimmed.is_empty() && !is_allowed_referer(trimmed, local_addr) {
+                    external_origin_or_referer = true;
+                    break;
+                }
+            }
+        }
+
+        if external_origin_or_referer {
+            warn!(
+                "Rejected cross-origin request to '{}' with external Origin/Referer header",
+                req_path
+            );
+            let resp = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: null\r\nConnection: close\r\n\r\n{\"error\":\"Forbidden: External cross-origin request rejected\"}";
+            client_stream.write_all(resp.as_bytes()).await?;
+            client_stream.flush().await?;
+            return Ok(());
+        }
+    }
 
     // Handle CORS preflight
     if method.eq_ignore_ascii_case("OPTIONS") {
@@ -355,6 +458,53 @@ async fn handle_client(
         return Ok(());
     }
 
+    // Route 5-import: Manual Proxy Import API (POST /api/proxies/import)
+    if method.eq_ignore_ascii_case("POST") && req_path == "/api/proxies/import" {
+        #[derive(serde::Deserialize)]
+        struct ImportReq {
+            proxies: Vec<String>,
+        }
+
+        let resp_str = match serde_json::from_slice::<ImportReq>(&body) {
+            Ok(req) => {
+                let mut count = 0;
+                for line in req.proxies {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let (proto, addr_str) = if let Some(rest) = trimmed.strip_prefix("socks5://") {
+                        (ProxyProto::Socks5, rest)
+                    } else if let Some(rest) = trimmed.strip_prefix("socks4://") {
+                        (ProxyProto::Socks4, rest)
+                    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+                        (ProxyProto::HttpConnect, rest)
+                    } else if let Some(rest) = trimmed.strip_prefix("https://") {
+                        (ProxyProto::HttpConnect, rest)
+                    } else {
+                        (ProxyProto::Socks5, trimmed)
+                    };
+                    if let Ok(addr) = addr_str.parse::<std::net::SocketAddr>() {
+                        if pool.add(addr, proto, None) {
+                            count += 1;
+                        }
+                    }
+                }
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"imported\":{}}}",
+                    count
+                )
+            }
+            Err(e) => format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n{{\"error\":\"{}\"}}",
+                e
+            ),
+        };
+        client_stream.write_all(resp_str.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
     // Route 5a: MEGA URL Inspection API (POST /api/mega/inspect)
     if method.eq_ignore_ascii_case("POST") && req_path == "/api/mega/inspect" {
         #[derive(serde::Deserialize)]
@@ -468,6 +618,143 @@ async fn handle_client(
         return Ok(());
     }
 
+    // Route 5d-2: Pause MEGA Download Task API (POST /api/mega/tasks/:id/pause)
+    if method.eq_ignore_ascii_case("POST")
+        && req_path.starts_with("/api/mega/tasks/")
+        && req_path.ends_with("/pause")
+    {
+        let task_id = req_path
+            .strip_prefix("/api/mega/tasks/")
+            .and_then(|s| s.strip_suffix("/pause"))
+            .unwrap_or("");
+
+        let success = download_mgr.pause_task(task_id).await;
+        let json = serde_json::json!({ "success": success }).to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5d-3: Resume MEGA Download Task API (POST /api/mega/tasks/:id/resume)
+    if method.eq_ignore_ascii_case("POST")
+        && req_path.starts_with("/api/mega/tasks/")
+        && req_path.ends_with("/resume")
+    {
+        let task_id = req_path
+            .strip_prefix("/api/mega/tasks/")
+            .and_then(|s| s.strip_suffix("/resume"))
+            .unwrap_or("");
+
+        let res = download_mgr.resume_task(task_id).await;
+        let json = match res {
+            Ok(started) => serde_json::json!({ "success": started }).to_string(),
+            Err(e) => serde_json::json!({ "success": false, "error": e }).to_string(),
+        };
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5d-4: Delete/Remove MEGA Download Task API (DELETE /api/mega/tasks/:id or POST /api/mega/tasks/:id/delete)
+    if (method.eq_ignore_ascii_case("DELETE") || method.eq_ignore_ascii_case("POST"))
+        && req_path.starts_with("/api/mega/tasks/")
+        && (method.eq_ignore_ascii_case("DELETE") || req_path.ends_with("/delete"))
+    {
+        let task_id = if method.eq_ignore_ascii_case("DELETE") {
+            req_path.strip_prefix("/api/mega/tasks/").unwrap_or("")
+        } else {
+            req_path
+                .strip_prefix("/api/mega/tasks/")
+                .and_then(|s| s.strip_suffix("/delete"))
+                .unwrap_or("")
+        };
+
+        let success = download_mgr.delete_task(task_id).await;
+        let json = serde_json::json!({ "success": success }).to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5d-5: Open Folder for Task (POST /api/mega/tasks/:id/open-folder)
+    if method.eq_ignore_ascii_case("POST")
+        && req_path.starts_with("/api/mega/tasks/")
+        && req_path.ends_with("/open-folder")
+    {
+        let task_id = req_path
+            .strip_prefix("/api/mega/tasks/")
+            .and_then(|s| s.strip_suffix("/open-folder"))
+            .unwrap_or("");
+
+        let res = download_mgr.open_task_folder(task_id).await;
+        let json = match res {
+            Ok(()) => serde_json::json!({ "success": true }).to_string(),
+            Err(e) => serde_json::json!({ "success": false, "error": e }).to_string(),
+        };
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5d-6: Live Downloader Configuration (GET & POST /api/mega/config)
+    if method.eq_ignore_ascii_case("GET") && req_path == "/api/mega/config" {
+        let cfg = download_mgr.get_config().await;
+        let json = serde_json::to_string(&cfg).unwrap_or_else(|_| "{}".to_string());
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    if method.eq_ignore_ascii_case("POST") && req_path == "/api/mega/config" {
+        let resp_str = match serde_json::from_slice::<crate::download::DownloaderConfig>(&body) {
+            Ok(new_cfg) => {
+                let updated = download_mgr.update_config(new_cfg).await;
+                let json = serde_json::to_string(&updated).unwrap_or_else(|_| "{}".to_string());
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    json.len(),
+                    json
+                )
+            }
+            Err(e) => {
+                let err_json = serde_json::json!({ "error": format!("Invalid config JSON: {}", e) }).to_string();
+                format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    err_json.len(),
+                    err_json
+                )
+            }
+        };
+        client_stream.write_all(resp_str.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
     // Route 5e: System Default Download Directory API (GET /api/system/default-dir)
     if method.eq_ignore_ascii_case("GET") && req_path == "/api/system/default-dir" {
         let base_dir = crate::resolve_default_download_dir();
@@ -493,6 +780,112 @@ async fn handle_client(
         let json = serde_json::json!({
             "path": selected_path
         }).to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5g: Get Application Settings (GET /api/settings)
+    if method.eq_ignore_ascii_case("GET") && req_path == "/api/settings" {
+        let settings = download_mgr.get_settings().await;
+        let json = serde_json::to_string(&settings).unwrap_or_else(|_| "{}".to_string());
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5h: Update Application Settings (POST /api/settings)
+    if method.eq_ignore_ascii_case("POST") && req_path == "/api/settings" {
+        let resp_str = match serde_json::from_slice::<crate::settings::AppSettings>(&body) {
+            Ok(new_settings) => {
+                let updated = download_mgr.update_settings(new_settings).await;
+                let json = serde_json::to_string(&updated).unwrap_or_else(|_| "{}".to_string());
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    json.len(),
+                    json
+                )
+            }
+            Err(e) => {
+                let err_json = serde_json::json!({ "error": format!("Invalid settings JSON: {}", e) }).to_string();
+                format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    err_json.len(),
+                    err_json
+                )
+            }
+        };
+        client_stream.write_all(resp_str.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5i: Reset Application Settings (POST /api/settings/reset)
+    if method.eq_ignore_ascii_case("POST") && req_path == "/api/settings/reset" {
+        let def = download_mgr.reset_settings().await;
+        let json = serde_json::to_string(&def).unwrap_or_else(|_| "{}".to_string());
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5j: In-Memory Debug Logs API (GET /api/debug/logs?limit=300)
+    if method.eq_ignore_ascii_case("GET") && req_path == "/api/debug/logs" {
+        let mut limit = 300;
+        if let Some(q) = req_query {
+            for param in q.split('&') {
+                if let Some(val) = param.strip_prefix("limit=") {
+                    if let Ok(parsed) = val.parse::<usize>() {
+                        limit = parsed;
+                    }
+                }
+            }
+        }
+        let logs = crate::logging::global_log_buffer().get_recent(limit);
+        let json = serde_json::to_string(&logs).unwrap_or_else(|_| "[]".to_string());
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5k: Clear Debug Logs API (POST /api/debug/clear)
+    if method.eq_ignore_ascii_case("POST") && req_path == "/api/debug/clear" {
+        crate::logging::global_log_buffer().clear();
+        let json = serde_json::json!({ "status": "cleared" }).to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5l: Toggle Release DevTools in Tauri Shell (POST /api/system/open-devtools)
+    if method.eq_ignore_ascii_case("POST") && req_path == "/api/system/open-devtools" {
+        crate::trigger_devtools();
+        let json = serde_json::json!({ "status": "ok" }).to_string();
         let resp = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             json.len(),

@@ -56,6 +56,27 @@ impl MegaFolderTree {
         self.files().iter().map(|f| f.size).sum()
     }
 
+    /// Resolves the human-readable root folder title, if present.
+    pub fn root_title(&self) -> Option<String> {
+        // 1. Look for a folder node whose handle matches folder_handle
+        if let Some(n) = self.nodes.iter().find(|n| n.node_type == FolderNodeType::Folder && n.handle == self.folder_handle) {
+            if !n.name.is_empty() && n.name != self.folder_handle {
+                return Some(n.name.clone());
+            }
+        }
+        // 2. Look for directory with empty parent_handle
+        if let Some(n) = self.nodes.iter().find(|n| n.node_type == FolderNodeType::Folder && n.parent_handle.is_empty()) {
+            if !n.name.is_empty() && n.name != self.folder_handle {
+                return Some(n.name.clone());
+            }
+        }
+        // 3. Fall back to any directory in the tree that has a non-empty name and != folder_handle
+        if let Some(d) = self.directories().iter().find(|d| !d.name.is_empty() && d.name != self.folder_handle) {
+            return Some(d.name.clone());
+        }
+        None
+    }
+
     /// Filters tree nodes based on deep-link subfolder or target file scope.
     ///
     /// - If `target_file_id` is specified: scopes the tree to only that single file node.
@@ -260,27 +281,36 @@ pub fn parse_folder_tree(
 
         let (key_opt, attr_key_opt) = match unwrap_node_key(&raw.k, folder_share_key, node_type) {
             Ok(k) => k,
-            Err(_) => continue, // Skip un-decryptable root or auxiliary nodes
+            Err(_) => {
+                // If this is a folder node (especially the root node whose handle matches folder_handle
+                // or whose parent is empty), its attributes might be encrypted directly with folder_share_key
+                if node_type == FolderNodeType::Folder {
+                    if let Ok(_) = decrypt_attributes(folder_share_key, &raw.a) {
+                        (None, Some(*folder_share_key))
+                    } else {
+                        continue;
+                    }
+                } else {
+                    continue; // Skip un-decryptable root or auxiliary nodes
+                }
+            }
         };
 
         let name = match node_type {
             FolderNodeType::Folder => {
-                if let Some(ak) = &attr_key_opt {
-                    decrypt_attributes(ak, &raw.a)
-                        .map(|attrs| attrs.name)
-                        .unwrap_or_else(|_| raw.h.clone())
-                } else {
-                    raw.h.clone()
-                }
+                let decrypted = attr_key_opt
+                    .as_ref()
+                    .and_then(|ak| decrypt_attributes(ak, &raw.a).ok())
+                    .or_else(|| decrypt_attributes(folder_share_key, &raw.a).ok())
+                    .map(|attrs| attrs.name);
+                decrypted.unwrap_or_else(|| raw.h.clone())
             }
             FolderNodeType::File => {
-                if let Some(fk) = &key_opt {
-                    decrypt_attributes(&fk.aes_key, &raw.a)
-                        .map(|attrs| attrs.name)
-                        .unwrap_or_else(|_| raw.h.clone())
-                } else {
-                    raw.h.clone()
-                }
+                let decrypted = key_opt
+                    .as_ref()
+                    .and_then(|fk| decrypt_attributes(&fk.aes_key, &raw.a).ok())
+                    .map(|attrs| attrs.name);
+                decrypted.unwrap_or_else(|| raw.h.clone())
             }
         };
 
@@ -305,23 +335,28 @@ pub fn parse_folder_tree(
 
     for (h, p, t, name, size, key, attr_key) in intermediate_nodes {
         // Resolve relative path up to the root folder
-        let mut path_components = vec![name.clone()];
-        let mut curr_parent = p.clone();
+        let relative_path = if h == folder_handle {
+            PathBuf::new()
+        } else {
+            let mut path_components = vec![name.clone()];
+            let mut curr_parent = p.clone();
 
-        while !curr_parent.is_empty() && curr_parent != folder_handle {
-            if let Some((next_parent, parent_name, _)) = node_map.get(&curr_parent) {
-                path_components.push(parent_name.clone());
-                curr_parent = next_parent.clone();
-            } else {
-                break;
+            while !curr_parent.is_empty() && curr_parent != folder_handle {
+                if let Some((next_parent, parent_name, _)) = node_map.get(&curr_parent) {
+                    path_components.push(parent_name.clone());
+                    curr_parent = next_parent.clone();
+                } else {
+                    break;
+                }
             }
-        }
 
-        path_components.reverse();
-        let mut relative_path = PathBuf::new();
-        for comp in path_components {
-            relative_path.push(comp);
-        }
+            path_components.reverse();
+            let mut pbuf = PathBuf::new();
+            for comp in path_components {
+                pbuf.push(comp);
+            }
+            pbuf
+        };
 
         resolved_nodes.push(MegaFolderNode {
             handle: h,

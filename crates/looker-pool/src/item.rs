@@ -73,6 +73,8 @@ pub struct ProxySnapshot {
     pub anonymity: AnonymityLevel,
     pub exit_ip: Option<IpAddr>,
     pub geo: Option<GeoInfo>,
+    #[serde(default)]
+    pub mega_cooldown: bool,
 }
 
 #[derive(Debug)]
@@ -90,6 +92,7 @@ pub struct ProxyItem {
     pub exit_ip: Option<IpAddr>,
     pub geo: Option<GeoInfo>,
     pub created_at: Instant,
+    pub mega_cooldown_until: parking_lot::RwLock<Option<Instant>>,
 }
 
 impl ProxyItem {
@@ -115,6 +118,47 @@ impl ProxyItem {
             exit_ip,
             geo,
             created_at: Instant::now(),
+            mega_cooldown_until: parking_lot::RwLock::new(None),
+        }
+    }
+
+    /// Checks if this proxy is currently under MEGA 509 quota cooldown.
+    pub fn is_mega_cooldown(&self) -> bool {
+        let lock = self.mega_cooldown_until.read();
+        if let Some(until) = *lock {
+            Instant::now() < until
+        } else {
+            false
+        }
+    }
+
+    /// Marks the proxy on MEGA 509 cooldown for duration clamped between 10s and 3600s.
+    /// Does NOT evict the proxy from general HTTP/SOCKS routing or trip the circuit breaker.
+    pub fn mark_mega_509_cooldown(&self, cooldown: Duration) {
+        let clamped_secs = cooldown.as_secs().clamp(10, 3600);
+        let until = Instant::now() + Duration::from_secs(clamped_secs);
+        let mut lock = self.mega_cooldown_until.write();
+        *lock = Some(until);
+    }
+
+    /// Clears any active MEGA cooldown.
+    pub fn clear_mega_cooldown(&self) {
+        let mut lock = self.mega_cooldown_until.write();
+        *lock = None;
+    }
+
+    /// Returns remaining seconds of MEGA cooldown if active.
+    pub fn mega_cooldown_remaining_secs(&self) -> Option<u64> {
+        let lock = self.mega_cooldown_until.read();
+        if let Some(until) = *lock {
+            let now = Instant::now();
+            if until > now {
+                Some((until - now).as_secs())
+            } else {
+                None
+            }
+        } else {
+            None
         }
     }
 
@@ -205,6 +249,7 @@ impl ProxyItem {
             anonymity: self.anonymity,
             exit_ip: self.exit_ip,
             geo: self.geo.clone(),
+            mega_cooldown: self.is_mega_cooldown(),
         }
     }
 

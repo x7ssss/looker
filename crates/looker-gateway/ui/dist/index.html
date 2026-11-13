@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>LOOKER // Network Control & MEGA Studio</title>
+  <title>Looker</title>
   <link rel="icon" href="data:," />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -15,309 +15,1385 @@
       theme: {
         extend: {
           colors: {
-            obsidian: '#09090b',
-            surface: '#121215',
-            panel: '#18181b',
-            stroke: 'rgba(255, 255, 255, 0.08)',
+            canvas: '#0c0d10',
+            surface: '#13151a',
+            panel: '#181b22',
+            stroke: 'rgba(255, 255, 255, 0.07)',
+            'stroke-strong': 'rgba(255, 255, 255, 0.14)',
+            primary: '#f1f3f5',
+            secondary: '#8b929e',
+            accent: '#10b981',
           },
           fontFamily: {
-            sans: ['Inter', 'sans-serif'],
-            mono: ['JetBrains Mono', 'monospace'],
+            sans: ['"Plus Jakarta Sans"', 'system-ui', 'sans-serif'],
+            mono: ['"IBM Plex Mono"', 'ui-monospace', 'monospace'],
           }
         }
       }
     };
   </script>
   <style>
-    body { background-color: #09090b; color: #f4f4f5; font-family: 'Inter', sans-serif; }
-    .mono { font-family: 'JetBrains Mono', monospace; }
-    .pulse-dot { animation: pulse 2s infinite ease-in-out; }
-    @keyframes pulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.9); } }
+    :root {
+      color-scheme: dark;
+    }
+    body {
+      background-color: #0c0d10;
+      color: #f1f3f5;
+      font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+      margin: 0;
+      padding: 0;
+    }
+    .mono {
+      font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    }
+    .tabular-nums {
+      font-variant-numeric: tabular-nums;
+    }
+    .pulse-dot {
+      animation: pulse 2s infinite ease-in-out;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.35; transform: scale(0.9); }
+    }
+    .tree-row {
+      user-select: none;
+    }
+    .tree-row.highlighted {
+      background-color: rgba(16, 185, 129, 0.16);
+      border-color: rgba(16, 185, 129, 0.4);
+    }
+    /* Custom clean scrollbars */
+    ::-webkit-scrollbar {
+      width: 7px;
+      height: 7px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0c0d10;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.14);
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.28);
+    }
   </style>
 </head>
 <body class="min-h-screen antialiased flex flex-col justify-between selection:bg-emerald-500/20 selection:text-emerald-300">
-  <div class="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 space-y-6">
-    <!-- Header -->
-    <header class="flex flex-wrap items-center justify-between gap-4 pb-6 border-b border-stroke">
-      <div class="flex items-center gap-3">
-        <div class="h-9 w-9 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold mono text-sm">LK</div>
-        <div>
-          <div class="flex items-center gap-2">
-            <h1 class="text-base font-semibold tracking-tight text-white">LOOKER</h1>
-            <span class="text-[10px] mono px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-zinc-400">v0.1.0</span>
+
+  <!-- Main Top Bar -->
+  <header class="sticky top-0 z-30 bg-[#0c0d10]/95 backdrop-blur-md border-b border-stroke px-4 sm:px-6 lg:px-8 py-3">
+    <div class="max-w-7xl mx-auto flex items-center justify-between gap-4">
+      
+      <!-- Brand & Status -->
+      <div class="flex items-center gap-4">
+        <div class="flex items-center gap-2.5">
+          <div class="h-8 w-8 rounded-lg bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold mono text-sm shadow-sm">
+            LK
           </div>
-          <p class="text-xs text-zinc-500">Autonomous Proxy Scraper, Gateway Daemon & MEGA Engine</p>
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="text-base font-bold tracking-tight text-primary">LOOKER</span>
+              <span class="text-xs mono px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-secondary">v0.1.0</span>
+            </div>
+          </div>
         </div>
-      </div>
-      <div class="flex flex-wrap items-center gap-2">
-        <div class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium mr-1">
+
+        <div class="hidden sm:flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs font-medium">
           <span class="h-2 w-2 rounded-full bg-emerald-400 pulse-dot"></span>
-          <span id="gateway-status">GATEWAY ONLINE (127.0.0.1:8080)</span>
-        </div>
-        <a href="/all.txt" target="_blank" title="All healthy proxies (proto://host:port)" class="px-2.5 py-1.5 rounded-lg border border-stroke bg-surface hover:bg-panel text-xs text-zinc-300 hover:text-white transition-colors mono">all.txt</a>
-        <a href="/socks5.txt" target="_blank" title="Healthy SOCKS5 proxies (host:port)" class="px-2.5 py-1.5 rounded-lg border border-violet-500/20 bg-violet-500/5 hover:bg-violet-500/15 text-xs text-violet-300 hover:text-violet-200 transition-colors mono">socks5.txt</a>
-        <a href="/socks4.txt" target="_blank" title="Healthy SOCKS4 proxies (host:port)" class="px-2.5 py-1.5 rounded-lg border border-sky-500/20 bg-sky-500/5 hover:bg-sky-500/15 text-xs text-sky-300 hover:text-sky-200 transition-colors mono">socks4.txt</a>
-        <a href="/http.txt" target="_blank" title="Healthy HTTP proxies (host:port)" class="px-2.5 py-1.5 rounded-lg border border-blue-500/20 bg-blue-500/5 hover:bg-blue-500/15 text-xs text-blue-300 hover:text-blue-200 transition-colors mono">http.txt</a>
-      </div>
-    </header>
-
-    <!-- Metrics Row -->
-    <section class="grid grid-cols-2 md:grid-cols-4 gap-4">
-      <div class="p-4 rounded-xl border border-stroke bg-surface">
-        <span class="text-[11px] font-medium text-zinc-400">Healthy Proxies</span>
-        <div class="text-3xl font-bold mono text-emerald-400 mt-2" id="metric-healthy">0</div>
-        <div class="flex items-center gap-2 mt-2 pt-2 border-t border-stroke/60 text-[10px] mono">
-          <span class="text-violet-400">S5: <span id="proto-s5-stat">0</span></span>
-          <span class="text-zinc-600">•</span>
-          <span class="text-sky-400">S4: <span id="proto-s4-stat">0</span></span>
-          <span class="text-zinc-600">•</span>
-          <span class="text-blue-400">HTTP: <span id="proto-http-stat">0</span></span>
-        </div>
-      </div>
-      <div class="p-4 rounded-xl border border-stroke bg-surface">
-        <div class="flex items-center justify-between">
-          <span class="text-[11px] font-medium text-zinc-400">Checking Progress</span>
-          <span class="text-[10px] mono text-zinc-500" id="progress-percent">0%</span>
-        </div>
-        <div class="flex items-baseline gap-1 mt-2">
-          <span class="text-3xl font-bold mono text-white" id="metric-checked">0</span>
-          <span class="text-xs text-zinc-500 mono">/ <span id="metric-total">0</span></span>
-        </div>
-        <div class="w-full bg-white/5 rounded-full h-1 mt-2 overflow-hidden">
-          <div class="bg-emerald-400 h-full rounded-full transition-all duration-300" id="progress-bar" style="width: 0%"></div>
-        </div>
-      </div>
-      <div class="p-4 rounded-xl border border-stroke bg-surface">
-        <span class="text-[11px] font-medium text-zinc-400">Average Latency</span>
-        <div class="flex items-baseline gap-1 mt-2">
-          <span class="text-3xl font-bold mono text-amber-400" id="metric-latency">0</span>
-          <span class="text-xs text-zinc-500 mono">ms</span>
-        </div>
-        <p class="text-[10px] text-zinc-500 mt-1">Monotonic full roundtrip</p>
-      </div>
-      <div class="p-4 rounded-xl border border-stroke bg-surface">
-        <span class="text-[11px] font-medium text-zinc-400">Quarantined</span>
-        <div class="text-3xl font-bold mono text-rose-400 mt-2" id="metric-quarantined">0</div>
-        <p class="text-[10px] text-zinc-500 mt-1">Tripped circuit breaker</p>
-      </div>
-    </section>
-
-    <!-- MEGA Downloader Studio Section -->
-    <section class="p-5 rounded-xl border border-stroke bg-surface space-y-4">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div class="flex items-center gap-2">
-            <h2 class="text-sm font-semibold text-white tracking-tight">MEGA Downloader Studio</h2>
-            <span class="text-[10px] mono px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-medium">QUOTA-BYPASS ENGINE</span>
-          </div>
-          <p class="text-xs text-zinc-400 mt-0.5">Stream ciphertext over rotating proxy gateway, decrypt in-flight AES-128-CTR & verify CBC-MAC</p>
+          <span id="gateway-status" class="tabular-nums">Online · <span id="topbar-healthy-count">0</span> proxies</span>
         </div>
       </div>
 
-      <!-- Link Input Box -->
-      <div class="flex flex-col sm:flex-row gap-2">
-        <div class="relative flex-1">
-          <input
-            type="text"
-            id="mega-url-input"
-            placeholder="Paste MEGA.nz URL (e.g. https://mega.nz/folder/... or https://mega.nz/file/...)"
-            class="w-full px-3.5 py-2.5 rounded-lg bg-obsidian border border-stroke text-xs text-zinc-200 placeholder-zinc-500 outline-none focus:border-emerald-500/50 transition-colors mono"
-          />
-        </div>
+      <!-- Segmented View Switcher Tabs -->
+      <nav class="flex items-center bg-surface p-1 rounded-xl border border-stroke" role="tablist">
         <button
-          onclick="inspectMegaLink()"
-          id="btn-inspect"
-          class="px-5 py-2.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-obsidian font-semibold text-xs transition-colors flex items-center justify-center gap-2 shrink-0 disabled:opacity-50"
+          type="button"
+          id="tab-btn-downloader"
+          onclick="switchView('downloader')"
+          class="flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-semibold transition-all bg-panel text-primary shadow-sm border border-stroke"
         >
-          <svg id="inspect-spinner" class="animate-spin h-3.5 w-3.5 text-obsidian hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
-            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
-          </svg>
-          <span id="inspect-btn-text">Inspect Link</span>
+          <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          <span>Downloader</span>
         </button>
+        <button
+          type="button"
+          id="tab-btn-pool"
+          onclick="switchView('pool')"
+          class="flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-all text-secondary hover:text-primary"
+        >
+          <svg class="w-4 h-4 text-sky-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10"/></svg>
+          <span>Proxy Pool</span>
+        </button>
+      </nav>
+
+      <!-- Right Action Controls -->
+      <div class="flex items-center gap-2 relative">
+        <!-- Settings Button -->
+        <button
+          id="open-settings-btn"
+          onclick="openSettingsModal()"
+          title="Engine Configuration"
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-stroke hover:border-stroke-strong bg-surface hover:bg-panel text-sm text-secondary hover:text-primary transition-colors font-medium"
+        >
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+          <span class="hidden sm:inline">Settings</span>
+        </button>
+
+        <!-- Debug Dropdown Toggle -->
+        <div class="relative">
+          <button
+            onclick="toggleDropdown('debug-dropdown')"
+            title="Diagnostics &amp; Developer Tools"
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-stroke hover:border-stroke-strong bg-surface hover:bg-panel text-sm text-secondary hover:text-primary transition-colors font-medium"
+          >
+            <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+            <span class="hidden sm:inline">Debug</span>
+            <svg class="w-3 h-3 ml-0.5 text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
+          <div id="debug-dropdown" class="hidden absolute right-0 mt-1.5 w-56 rounded-xl bg-surface border border-stroke-strong shadow-2xl py-1.5 z-40 text-sm">
+            <button onclick="toggleDebugConsole(); closeDropdowns();" class="w-full text-left px-3.5 py-2 hover:bg-panel text-secondary hover:text-primary transition-colors flex items-center justify-between">
+              <span>Toggle Live Console</span>
+              <kbd class="mono text-xs px-1.5 py-0.5 bg-black/40 rounded border border-stroke text-secondary">Ctrl+Shift+D</kbd>
+            </button>
+            <button onclick="toggleDevTools(); closeDropdowns();" class="w-full text-left px-3.5 py-2 hover:bg-panel text-secondary hover:text-primary transition-colors flex items-center justify-between">
+              <span>Toggle DevTools</span>
+              <kbd class="mono text-xs px-1.5 py-0.5 bg-black/40 rounded border border-stroke text-secondary">F12</kbd>
+            </button>
+            <div class="h-px bg-stroke my-1"></div>
+            <button onclick="saveDebugLog(); closeDropdowns();" class="w-full text-left px-3.5 py-2 hover:bg-panel text-secondary hover:text-primary transition-colors flex items-center gap-2">
+              <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+              <span>Save Debug Log (.log)</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Export Dropdown Toggle -->
+        <div class="relative">
+          <button
+            onclick="toggleDropdown('export-dropdown')"
+            title="Proxy Exports &amp; Feeds"
+            class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-stroke hover:border-stroke-strong bg-surface hover:bg-panel text-sm text-secondary hover:text-primary transition-colors font-medium"
+          >
+            <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+            <span class="hidden sm:inline">Export</span>
+            <svg class="w-3 h-3 ml-0.5 text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
+          <div id="export-dropdown" class="hidden absolute right-0 mt-1.5 w-52 rounded-xl bg-surface border border-stroke-strong shadow-2xl py-1.5 z-40 text-sm">
+            <a href="/all.txt" target="_blank" class="block px-3.5 py-2 hover:bg-panel text-secondary hover:text-primary transition-colors mono text-xs">all.txt (All Healthy)</a>
+            <a href="/socks5.txt" target="_blank" class="block px-3.5 py-2 hover:bg-panel text-violet-300 hover:text-violet-200 transition-colors mono text-xs">socks5.txt (SOCKS5)</a>
+            <a href="/socks4.txt" target="_blank" class="block px-3.5 py-2 hover:bg-panel text-sky-300 hover:text-sky-200 transition-colors mono text-xs">socks4.txt (SOCKS4)</a>
+            <a href="/http.txt" target="_blank" class="block px-3.5 py-2 hover:bg-panel text-blue-300 hover:text-blue-200 transition-colors mono text-xs">http.txt (HTTP/CONNECT)</a>
+            <div class="h-px bg-stroke my-1"></div>
+            <button onclick="openImportModal(); closeDropdowns();" class="w-full text-left px-3.5 py-2 hover:bg-panel text-emerald-400 hover:text-emerald-300 transition-colors flex items-center gap-1.5 text-xs font-semibold">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+              <span>Import Proxies...</span>
+            </button>
+          </div>
+        </div>
+
       </div>
+    </div>
+  </header>
 
-      <div id="inspect-error" class="hidden p-3 rounded-lg bg-rose-500/10 border border-rose-500/20 text-xs text-rose-400 mono"></div>
+  <!-- Main View Container -->
+  <main class="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 space-y-6 flex-1">
 
-      <!-- Inspected Item & File Selection Card -->
-      <div id="inspect-result-container" class="hidden p-4 rounded-xl bg-obsidian border border-stroke space-y-4">
-        <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-stroke">
+    <!-- ============================================================ -->
+    <!-- VIEW 1: MEGA DOWNLOADER WORKSPACE                            -->
+    <!-- ============================================================ -->
+    <div id="view-downloader" class="space-y-6">
+
+      <!-- Downloader Controls & URL Input Card -->
+      <section class="p-5 sm:p-6 rounded-2xl border border-stroke bg-surface space-y-5 shadow-xl">
+        <!-- Compact Transfer Controls Strip -->
+        <div class="p-3.5 rounded-xl bg-panel border border-stroke flex flex-wrap items-center justify-between gap-3 text-sm">
+          <!-- Routing Mode Toggle -->
           <div class="flex items-center gap-2.5">
-            <span class="px-2 py-0.5 rounded text-[10px] mono bg-emerald-500/10 border border-emerald-500/20 text-emerald-400" id="inspect-type-badge">FOLDER</span>
-            <span class="text-sm font-semibold text-white mono" id="inspect-title">—</span>
-            <span class="text-xs text-zinc-500 mono">•</span>
-            <span class="text-xs text-zinc-400 mono font-medium" id="inspect-total-size">0 B</span>
-          </div>
-          <div class="flex items-center gap-2">
-            <button onclick="selectAllHandles(true)" class="px-2.5 py-1 rounded-md text-[11px] mono bg-surface hover:bg-panel text-zinc-300 border border-stroke transition-colors">Select All</button>
-            <button onclick="selectAllHandles(false)" class="px-2.5 py-1 rounded-md text-[11px] mono bg-surface hover:bg-panel text-zinc-400 border border-stroke transition-colors">Deselect All</button>
-          </div>
-        </div>
-
-        <!-- Node Checklist -->
-        <div class="space-y-1.5 max-h-56 overflow-y-auto pr-1" id="inspect-nodes-list"></div>
-
-        <!-- Download Destination & Categories -->
-        <div class="space-y-3 pt-3 border-t border-stroke">
-          <div class="flex flex-wrap items-center justify-between gap-2">
-            <span class="text-[11px] font-medium text-zinc-400 uppercase tracking-wider">Download Category</span>
-            <span class="text-zinc-500 mono text-xs" id="selection-summary-text">Selected: 0 files</span>
-          </div>
-          <div class="flex flex-wrap items-center gap-1.5" id="category-pills">
-            <button type="button" onclick="setCategory('')" id="cat-general" class="cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-white/15 text-white border border-white/25">General</button>
-            <button type="button" onclick="setCategory('Media')" id="cat-media" class="cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">Media &amp; Video</button>
-            <button type="button" onclick="setCategory('Software')" id="cat-software" class="cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">Software &amp; ISOs</button>
-            <button type="button" onclick="setCategory('Games')" id="cat-games" class="cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">Games</button>
-            <button type="button" onclick="setCategory('Archives')" id="cat-archives" class="cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">Archives</button>
-          </div>
-          <div class="flex items-center gap-2">
-            <span class="text-xs text-zinc-400 shrink-0">Destination:</span>
-            <input
-              type="text"
-              id="output-dir-input"
-              class="w-full px-3 py-1.5 rounded-lg bg-surface border border-stroke text-xs text-zinc-200 outline-none focus:border-emerald-500/50 mono transition-colors"
-            />
-            <button
-              type="button"
-              onclick="browseFolder()"
-              id="btn-browse-folder"
-              class="px-3 py-1.5 rounded-lg bg-surface hover:bg-panel border border-stroke text-xs text-zinc-300 hover:text-white transition-colors shrink-0 mono flex items-center gap-1.5"
-            >
-              <svg class="w-3.5 h-3.5 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
-              <span>Browse...</span>
-            </button>
-            <button
-              type="button"
-              onclick="startDownload()"
-              id="btn-start-download"
-              class="px-4 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-obsidian font-semibold text-xs transition-colors flex items-center gap-1.5 shrink-0 disabled:opacity-50"
-            >
-              <span>Start Download</span>
-              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Active Downloads Card -->
-      <div id="tasks-container" class="hidden space-y-3 pt-2">
-        <div class="flex items-center justify-between">
-          <h3 class="text-xs font-semibold text-zinc-300 uppercase tracking-wider">Active Download Tasks</h3>
-          <span class="text-[10px] mono text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 px-2 py-0.5 rounded">LIVE QUEUE</span>
-        </div>
-        <div class="space-y-2.5" id="tasks-list"></div>
-      </div>
-    </section>
-
-    <!-- Main Content: Fastest Nodes & Table -->
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
-      <!-- Fastest Proxies Card -->
-      <section class="p-5 rounded-xl border border-stroke bg-surface space-y-4">
-        <div class="flex items-center justify-between">
-          <h2 class="text-xs font-semibold text-zinc-200 uppercase tracking-wider">Fastest Surviving Nodes</h2>
-          <span class="text-[10px] mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded">REALTIME</span>
-        </div>
-        <div class="space-y-2" id="fastest-list">
-          <p class="text-xs text-zinc-500 py-4 text-center">Checking candidate endpoints...</p>
-        </div>
-        <div class="pt-3 border-t border-stroke space-y-2">
-          <span class="text-[11px] font-medium text-zinc-400">Downloader Command Helper</span>
-          <div class="p-2.5 rounded-lg bg-obsidian border border-stroke font-mono text-[11px] text-emerald-400 flex items-center justify-between gap-2 overflow-x-auto">
-            <span class="truncate">looker-down &lt;MEGA_URL&gt;</span>
-            <button onclick="navigator.clipboard.writeText('looker-down ')" class="text-xs text-zinc-400 hover:text-white transition-colors">Copy</button>
-          </div>
-        </div>
-      </section>
-
-      <!-- Main Proxy Table -->
-      <section class="lg:col-span-2 p-5 rounded-xl border border-stroke bg-surface space-y-4">
-        <div class="flex flex-wrap items-center justify-between gap-3">
-          <div class="space-y-1.5">
-            <h2 class="text-xs font-semibold text-zinc-200 uppercase tracking-wider">Surviving Proxy Pool</h2>
-            <!-- Protocol Pill Selector -->
-            <div class="flex items-center gap-1.5" id="proto-pills">
-              <button onclick="setProtoFilter('all')" id="pill-all" class="proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-white/15 text-white border border-white/25 shadow-sm">
-                All (<span id="count-all">0</span>)
+            <span class="text-secondary mono text-xs font-semibold uppercase tracking-wider">Routing Mode:</span>
+            <div class="flex items-center bg-surface p-0.5 rounded-lg border border-stroke">
+              <button
+                type="button"
+                onclick="setRoutingMode('passive')"
+                id="mode-passive"
+                class="px-3 py-1 rounded-md text-xs font-semibold mono transition-colors bg-white/15 text-primary shadow-sm"
+              >
+                Passive 509 Fallback
               </button>
-              <button onclick="setProtoFilter('SOCKS5')" id="pill-socks5" class="proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">
-                SOCKS5 (<span id="count-socks5">0</span>)
-              </button>
-              <button onclick="setProtoFilter('SOCKS4')" id="pill-socks4" class="proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">
-                SOCKS4 (<span id="count-socks4">0</span>)
-              </button>
-              <button onclick="setProtoFilter('HTTP')" id="pill-http" class="proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke">
-                HTTP (<span id="count-http">0</span>)
+              <button
+                type="button"
+                onclick="setRoutingMode('force_proxy')"
+                id="mode-force"
+                class="px-3 py-1 rounded-md text-xs font-semibold mono transition-colors text-secondary hover:text-primary"
+              >
+                Force Proxy
               </button>
             </div>
           </div>
-          <input type="text" id="search-box" placeholder="Filter by IP, Country..." class="px-3 py-1.5 rounded-lg bg-obsidian border border-stroke text-xs text-zinc-300 placeholder-zinc-600 outline-none focus:border-emerald-500/50 w-56 transition-colors self-end" />
+
+          <!-- Numerical Engine Settings -->
+          <div class="flex flex-wrap items-center gap-5">
+            <div class="flex items-center gap-2">
+              <span class="text-secondary mono text-xs font-medium">Workers/File:</span>
+              <input
+                type="number"
+                id="cfg-workers"
+                min="1"
+                max="24"
+                value="6"
+                onchange="saveConfig()"
+                class="w-16 px-2.5 py-1 rounded-lg bg-surface border border-stroke text-primary mono text-sm text-center tabular-nums focus:border-emerald-500 outline-none"
+              />
+            </div>
+
+            <div class="flex items-center gap-2">
+              <span class="text-secondary mono text-xs font-medium">Max Parallel:</span>
+              <input
+                type="number"
+                id="cfg-max-files"
+                min="1"
+                max="5"
+                value="2"
+                onchange="saveConfig()"
+                class="w-16 px-2.5 py-1 rounded-lg bg-surface border border-stroke text-primary mono text-sm text-center tabular-nums focus:border-emerald-500 outline-none"
+              />
+            </div>
+
+            <div class="flex items-center gap-2">
+              <span class="text-secondary mono text-xs font-medium">Speed Cap:</span>
+              <div class="flex items-center">
+                <input
+                  type="number"
+                  id="cfg-speed-limit"
+                  min="0"
+                  step="1"
+                  value="0"
+                  onchange="saveConfig()"
+                  class="w-20 px-2.5 py-1 rounded-l-lg bg-surface border border-stroke text-primary mono text-sm text-center tabular-nums focus:border-emerald-500 outline-none"
+                />
+                <span class="px-2.5 py-1 rounded-r-lg bg-panel border-y border-r border-stroke text-xs text-secondary mono">MB/s</span>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="overflow-x-auto max-h-[460px] overflow-y-auto">
-          <table class="w-full text-left text-xs">
-            <thead class="sticky top-0 bg-surface border-b border-stroke text-zinc-400 font-medium">
-              <tr>
-                <th class="pb-2">Endpoint</th>
-                <th class="pb-2">Protocol</th>
-                <th class="pb-2">Country</th>
-                <th class="pb-2">Latency</th>
-                <th class="pb-2">Anonymity</th>
-              </tr>
-            </thead>
-            <tbody id="proxy-table-body" class="divide-y divide-white/[0.04] text-zinc-300">
-              <tr><td colspan="5" class="py-8 text-center text-zinc-500">Awaiting stream from checking engine...</td></tr>
-            </tbody>
-          </table>
+
+        <!-- URL Input & Inspect Action -->
+        <div class="space-y-2">
+          <label for="mega-url-input" class="block text-xs font-semibold text-secondary uppercase tracking-wider">MEGA Links</label>
+          <div class="flex flex-col sm:flex-row gap-2.5 items-stretch">
+            <div class="relative flex-1">
+              <textarea
+                id="mega-url-input"
+                rows="2"
+                placeholder="Paste MEGA.nz links (single or newline-separated folder/file URLs, e.g. https://mega.nz/folder/...)"
+                class="w-full px-4 py-2.5 rounded-xl bg-panel border border-stroke text-sm text-primary placeholder-zinc-500 outline-none focus:border-emerald-500/50 transition-colors mono resize-none"
+              ></textarea>
+            </div>
+            <button
+              onclick="inspectMegaLink()"
+              id="btn-inspect"
+              class="h-11 px-6 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-[#0c0d10] font-bold text-sm transition-all flex items-center justify-center gap-2 shrink-0 disabled:opacity-50 shadow-lg shadow-emerald-500/20 active:scale-[0.98]"
+            >
+              <svg id="inspect-spinner" class="animate-spin h-4 w-4 text-[#0c0d10] hidden" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+              </svg>
+              <span id="inspect-btn-text">Inspect Links</span>
+            </button>
+          </div>
+        </div>
+
+        <div id="inspect-error" class="hidden p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/25 text-sm text-rose-400 mono"></div>
+
+        <!-- Active Downloads Transfer Queue -->
+        <div id="tasks-container" class="hidden space-y-3 pt-3 border-t border-stroke">
+          <div class="flex items-center justify-between">
+            <h3 class="text-xs font-semibold text-secondary uppercase tracking-wider">Transfer Queue</h3>
+            <span class="text-xs mono text-cyan-400 bg-cyan-500/10 border border-cyan-500/25 px-2.5 py-0.5 rounded-full font-medium">LIVE QUEUE</span>
+          </div>
+          <div class="space-y-3" id="tasks-list"></div>
         </div>
       </section>
+
+    </div>
+
+    <!-- ============================================================ -->
+    <!-- VIEW 2: PROXY POOL & TELEMETRY WORKSPACE                     -->
+    <!-- ============================================================ -->
+    <div id="view-pool" class="space-y-6 hidden">
+
+      <!-- Telemetry Strip (4 Metric Cards) -->
+      <section class="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <!-- Healthy Proxies Card -->
+        <div class="p-5 rounded-2xl border border-stroke bg-surface shadow-md">
+          <span class="text-xs font-medium text-secondary uppercase tracking-wider">Healthy Proxies</span>
+          <div class="text-3xl font-bold mono tabular-nums text-emerald-400 mt-2" id="metric-healthy">0</div>
+          <div class="flex items-center gap-2 mt-2 pt-2.5 border-t border-stroke text-xs mono">
+            <span class="text-violet-400">S5: <span id="proto-s5-stat" class="tabular-nums">0</span></span>
+            <span class="text-zinc-600">•</span>
+            <span class="text-sky-400">S4: <span id="proto-s4-stat" class="tabular-nums">0</span></span>
+            <span class="text-zinc-600">•</span>
+            <span class="text-blue-400">HTTP: <span id="proto-http-stat" class="tabular-nums">0</span></span>
+          </div>
+        </div>
+
+        <!-- Validation Progress Card -->
+        <div class="p-5 rounded-2xl border border-stroke bg-surface shadow-md">
+          <div class="flex items-center justify-between">
+            <span class="text-xs font-medium text-secondary uppercase tracking-wider">Validation Progress</span>
+            <span class="text-xs mono tabular-nums text-secondary" id="progress-percent">0%</span>
+          </div>
+          <div class="flex items-baseline gap-1 mt-2">
+            <span class="text-3xl font-bold mono tabular-nums text-primary" id="metric-checked">0</span>
+            <span class="text-sm text-secondary mono tabular-nums">/ <span id="metric-total">0</span></span>
+          </div>
+          <div class="w-full bg-white/5 rounded-full h-1.5 mt-2.5 overflow-hidden">
+            <div class="bg-emerald-400 h-full rounded-full transition-all duration-300" id="progress-bar" style="width: 0%"></div>
+          </div>
+        </div>
+
+        <!-- Average Latency Card -->
+        <div class="p-5 rounded-2xl border border-stroke bg-surface shadow-md">
+          <span class="text-xs font-medium text-secondary uppercase tracking-wider">Average Latency</span>
+          <div class="flex items-baseline gap-1 mt-2">
+            <span class="text-3xl font-bold mono tabular-nums text-amber-400" id="metric-latency">0</span>
+            <span class="text-sm text-secondary mono">ms</span>
+          </div>
+          <p class="text-xs text-secondary mt-2">Monotonic roundtrip benchmark</p>
+        </div>
+
+        <!-- Quarantined Card -->
+        <div class="p-5 rounded-2xl border border-stroke bg-surface shadow-md">
+          <span class="text-xs font-medium text-secondary uppercase tracking-wider">Quarantined</span>
+          <div class="text-3xl font-bold mono tabular-nums text-rose-400 mt-2" id="metric-quarantined">0</div>
+          <p class="text-xs text-secondary mt-2">Tripped circuit breaker</p>
+        </div>
+      </section>
+
+      <!-- Fastest Nodes & Verified Proxy Pool Table -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <!-- Fastest Nodes Column -->
+        <section class="p-5 sm:p-6 rounded-2xl border border-stroke bg-surface space-y-4 shadow-xl">
+          <div class="flex items-center justify-between">
+            <h2 class="text-xs font-semibold text-primary uppercase tracking-wider">Fastest Surviving Nodes</h2>
+            <span class="text-xs mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/25 px-2.5 py-0.5 rounded-full font-semibold">REALTIME</span>
+          </div>
+          <div class="space-y-2.5" id="fastest-list">
+            <p class="text-sm text-secondary">Awaiting stream verification...</p>
+          </div>
+        </section>
+
+        <!-- Verified Proxies Table Card -->
+        <section class="lg:col-span-2 p-5 sm:p-6 rounded-2xl border border-stroke bg-surface space-y-4 shadow-xl">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 class="text-xs font-semibold text-primary uppercase tracking-wider">Surviving Proxy Pool</h2>
+              <p class="text-xs text-secondary mt-0.5">Filter by protocol &amp; live search</p>
+            </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <!-- Protocol Filter Pills -->
+              <div class="flex items-center gap-1.5" id="proto-pills">
+                <button onclick="setProtoFilter('all')" id="pill-all" class="proto-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-white/15 text-primary border border-white/20 shadow-sm">
+                  All (<span id="count-all" class="tabular-nums">0</span>)
+                </button>
+                <button onclick="setProtoFilter('SOCKS5')" id="pill-socks5" class="proto-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-panel text-secondary hover:text-primary border border-stroke">
+                  SOCKS5 (<span id="count-socks5" class="tabular-nums">0</span>)
+                </button>
+                <button onclick="setProtoFilter('SOCKS4')" id="pill-socks4" class="proto-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-panel text-secondary hover:text-primary border border-stroke">
+                  SOCKS4 (<span id="count-socks4" class="tabular-nums">0</span>)
+                </button>
+                <button onclick="setProtoFilter('HTTP')" id="pill-http" class="proto-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-panel text-secondary hover:text-primary border border-stroke">
+                  HTTP (<span id="count-http" class="tabular-nums">0</span>)
+                </button>
+              </div>
+              <!-- Search Input -->
+              <input 
+                type="text" 
+                id="search-box" 
+                placeholder="Search IP, ASN, Country..." 
+                class="px-3 py-1.5 rounded-lg bg-panel border border-stroke text-xs text-primary placeholder-zinc-500 outline-none focus:border-emerald-500/50 transition-colors mono w-48"
+              />
+            </div>
+          </div>
+
+          <div class="overflow-x-auto">
+            <table class="w-full text-left text-sm">
+              <thead>
+                <tr class="border-b border-stroke text-secondary mono text-xs">
+                  <th class="py-2.5 font-medium">ENDPOINT</th>
+                  <th class="py-2.5 font-medium">PROTO</th>
+                  <th class="py-2.5 font-medium">LOCATION</th>
+                  <th class="py-2.5 font-medium">LATENCY</th>
+                  <th class="py-2.5 font-medium">ANONYMITY</th>
+                </tr>
+              </thead>
+              <tbody id="proxy-table-body" class="divide-y divide-stroke/50">
+                <tr>
+                  <td colspan="5" class="py-8 text-center text-secondary">Loading verified proxy pool...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+    </div>
+
+  </main>
+
+  <!-- Slide-Up Live Rust Debug Console Drawer -->
+  <aside
+    id="debug-console-drawer"
+    class="fixed bottom-0 left-0 right-0 z-40 bg-[#090a0d] border-t border-stroke-strong shadow-2xl transition-transform duration-300 ease-in-out translate-y-full flex flex-col h-80"
+  >
+    <!-- Drawer Header -->
+    <div class="flex items-center justify-between px-4 sm:px-6 py-2.5 bg-surface border-b border-stroke shrink-0">
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2">
+          <span class="h-2 w-2 rounded-full bg-emerald-400 pulse-dot"></span>
+          <span class="text-sm font-bold text-primary mono">Live Rust Tracing Buffer</span>
+        </div>
+        <span class="text-xs mono px-2 py-0.5 rounded bg-white/5 border border-stroke text-secondary tabular-nums">
+          <span id="debug-log-count">0</span> entries
+        </span>
+      </div>
+
+      <div class="flex items-center gap-3">
+        <!-- Keyword Filter -->
+        <input
+          type="text"
+          id="debug-filter-input"
+          placeholder="Filter logs (e.g. 509, chunk, error)..."
+          oninput="onDebugFilterInput(this.value)"
+          class="px-3 py-1 rounded-lg bg-panel border border-stroke text-xs text-primary placeholder-zinc-500 outline-none focus:border-emerald-500/50 mono w-56"
+        />
+
+        <!-- Auto-scroll checkbox -->
+        <label class="flex items-center gap-1.5 text-xs text-secondary cursor-pointer hover:text-primary">
+          <input type="checkbox" id="debug-autoscroll" checked class="rounded bg-panel border-stroke text-emerald-500 focus:ring-0" />
+          <span>Auto-scroll</span>
+        </label>
+
+        <!-- Actions -->
+        <button onclick="copyDebugLogs()" class="px-2.5 py-1 rounded-lg bg-panel hover:bg-surface border border-stroke text-xs text-secondary hover:text-primary transition-colors mono">Copy</button>
+        <button onclick="clearDebugLogs()" class="px-2.5 py-1 rounded-lg bg-panel hover:bg-surface border border-stroke text-xs text-rose-400 hover:text-rose-300 transition-colors mono">Clear</button>
+        <button onclick="toggleDebugConsole(false)" class="p-1 rounded-lg text-secondary hover:text-primary hover:bg-white/10 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Terminal Body -->
+    <div id="debug-logs-container" class="flex-1 overflow-y-auto p-4 space-y-1.5 font-mono text-xs select-text bg-[#090a0d]">
+      <div class="text-secondary text-center py-8">Awaiting tracing logs from gateway...</div>
+    </div>
+  </aside>
+
+  <!-- ============================================================ -->
+  <!-- MODALS                                                       -->
+  <!-- ============================================================ -->
+
+  <!-- MegaBasterd-Style Interactive Folder Link Modal -->
+  <div id="folder-tree-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md hidden p-4">
+    <div class="w-full max-w-4xl max-h-[92vh] flex flex-col rounded-2xl bg-surface border border-stroke-strong shadow-2xl overflow-hidden">
+      <!-- Modal Header -->
+      <div class="flex items-center justify-between p-4 border-b border-stroke bg-panel">
+        <div class="flex items-center gap-3">
+          <span class="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+          </span>
+          <div>
+            <div class="flex items-center gap-2.5">
+              <h3 class="text-base font-bold text-primary tracking-tight mono" id="modal-folder-title">FolderLink</h3>
+              <span id="modal-type-badge" class="px-2 py-0.5 rounded text-xs mono bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 font-semibold">FOLDER</span>
+            </div>
+            <p class="text-xs text-secondary mt-0.5">Interactive tree selection: keep or remove specific files and subfolders</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-4">
+          <div class="text-right">
+            <div class="text-xs text-secondary mono">Total Selected:</div>
+            <div class="text-base font-bold text-emerald-400 mono tabular-nums" id="modal-total-size">0.00 MB</div>
+          </div>
+          <button onclick="closeFolderModal()" class="p-2 rounded-lg text-secondary hover:text-primary hover:bg-white/10 transition-colors">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Filter & Action Controls Bar -->
+      <div class="p-3 border-b border-stroke bg-panel flex flex-wrap items-center justify-between gap-2.5 text-xs">
+        <div class="flex items-center gap-2 flex-1 min-w-[220px]">
+          <input
+            type="text"
+            id="tree-search-filter"
+            placeholder="Filter by keyword or extension (e.g. .mp4, 1080p)..."
+            oninput="onTreeFilterInput(this.value)"
+            class="w-full px-3 py-1.5 rounded-lg bg-surface border border-stroke text-xs text-primary outline-none focus:border-emerald-500/50 mono transition-colors"
+          />
+        </div>
+        <div class="flex items-center gap-1.5 shrink-0">
+          <button onclick="selectAllTreeItems(true)" class="px-3 py-1 rounded-lg text-xs mono bg-surface hover:bg-panel text-secondary hover:text-primary border border-stroke transition-colors font-medium">Select All</button>
+          <button onclick="selectAllTreeItems(false)" class="px-3 py-1 rounded-lg text-xs mono bg-surface hover:bg-panel text-secondary hover:text-primary border border-stroke transition-colors font-medium">Deselect All</button>
+          <button onclick="keepSelectedTreeItems()" id="btn-keep-this" class="px-3 py-1 rounded-lg text-xs mono font-bold bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 transition-colors flex items-center gap-1">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+            <span>KEEP THIS</span>
+          </button>
+          <button onclick="removeSelectedTreeItems()" id="btn-remove-this" class="px-3 py-1 rounded-lg text-xs mono font-bold bg-rose-500/15 hover:bg-rose-500/25 text-rose-400 border border-rose-500/30 transition-colors flex items-center gap-1">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+            <span>REMOVE THIS</span>
+          </button>
+          <button onclick="restoreTreeData()" id="btn-restore-tree" class="px-3 py-1 rounded-lg text-xs mono bg-surface hover:bg-panel text-secondary hover:text-primary border border-stroke transition-colors font-medium">Restore</button>
+        </div>
+      </div>
+
+      <!-- Collapsible Tree View Container -->
+      <div class="flex-1 overflow-y-auto p-4 space-y-1 bg-black/40 font-mono text-xs select-none max-h-[50vh]" id="modal-tree-container">
+        <!-- Tree Nodes Rendered Here -->
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="p-4 border-t border-stroke bg-panel space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-2.5">
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-semibold text-secondary uppercase tracking-wider">Category:</span>
+            <div class="flex flex-wrap items-center gap-1.5" id="modal-category-pills">
+              <button type="button" onclick="setCategory('')" id="cat-general" class="cat-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-white/15 text-primary border border-white/20">General</button>
+              <button type="button" onclick="setCategory('Media')" id="cat-media" class="cat-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-surface text-secondary hover:text-primary border border-stroke">Media &amp; Video</button>
+              <button type="button" onclick="setCategory('Software')" id="cat-software" class="cat-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-surface text-secondary hover:text-primary border border-stroke">Software &amp; ISOs</button>
+              <button type="button" onclick="setCategory('Games')" id="cat-games" class="cat-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-surface text-secondary hover:text-primary border border-stroke">Games</button>
+              <button type="button" onclick="setCategory('Archives')" id="cat-archives" class="cat-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-surface text-secondary hover:text-primary border border-stroke">Archives</button>
+            </div>
+          </div>
+          <span class="text-secondary mono text-xs font-medium tabular-nums" id="modal-files-count">Selected: 0 files</span>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2.5">
+          <span class="text-xs text-secondary shrink-0 font-medium">Destination:</span>
+          <input
+            type="text"
+            id="output-dir-input"
+            class="flex-1 min-w-[200px] px-3.5 py-2 rounded-xl bg-surface border border-stroke text-xs text-primary outline-none focus:border-emerald-500/50 mono transition-colors"
+          />
+          <button
+            type="button"
+            onclick="browseFolder()"
+            id="btn-browse-folder"
+            class="px-4 py-2 rounded-xl bg-surface hover:bg-panel border border-stroke text-xs text-secondary hover:text-primary transition-colors shrink-0 mono flex items-center gap-1.5 font-medium"
+          >
+            <svg class="w-4 h-4 text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+            <span>Browse...</span>
+          </button>
+          <button
+            type="button"
+            onclick="startModalDownload()"
+            id="btn-modal-start-download"
+            class="px-6 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-[#0c0d10] font-bold text-xs transition-all flex items-center gap-2 shrink-0 disabled:opacity-50 shadow-lg shadow-emerald-500/20 active:scale-[0.98]"
+          >
+            <span>Start Download</span>
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 5l7 7m0 0l-7 7m7-7H3"/></svg>
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 
-  <footer class="max-w-7xl mx-auto w-full px-4 py-4 text-center border-t border-stroke text-[11px] text-zinc-600 mono">
-    LOOKER // HIGH-PERFORMANCE PROXY DAEMON & MEGA ENGINE - 127.0.0.1:8080
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md hidden p-4">
+    <div class="w-full max-w-3xl max-h-[92vh] flex flex-col rounded-2xl bg-surface border border-stroke-strong shadow-2xl overflow-hidden">
+      <!-- Settings Header -->
+      <div class="flex items-center justify-between p-4 border-b border-stroke bg-panel">
+        <div class="flex items-center gap-3">
+          <span class="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/></svg>
+          </span>
+          <div>
+            <h3 class="text-base font-bold text-primary tracking-tight">Settings</h3>
+          </div>
+        </div>
+        <button onclick="closeSettingsModal()" class="p-2 rounded-lg text-secondary hover:text-primary hover:bg-white/10 transition-colors">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <!-- 3 Tabs Navigation -->
+      <div class="flex items-center gap-2 px-4 pt-3 border-b border-stroke bg-panel/60 text-sm font-medium">
+        <button id="settings-tab-btn-downloads" onclick="switchSettingsTab('downloads')" class="px-3.5 py-2 border-b-2 border-emerald-400 text-emerald-300 font-semibold transition-colors flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          <span>Downloads &amp; Automation</span>
+        </button>
+        <button id="settings-tab-btn-proxy" onclick="switchSettingsTab('proxy')" class="px-3.5 py-2 border-b-2 border-transparent text-secondary hover:text-primary transition-colors flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/></svg>
+          <span>SmartProxy &amp; Routing</span>
+        </button>
+        <button id="settings-tab-btn-hooks" onclick="switchSettingsTab('hooks')" class="px-3.5 py-2 border-b-2 border-transparent text-secondary hover:text-primary transition-colors flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/></svg>
+          <span>Hooks &amp; Backup</span>
+        </button>
+      </div>
+
+      <!-- Tab Contents Container -->
+      <div class="flex-1 overflow-y-auto p-5 sm:p-6 space-y-5 max-h-[60vh] text-sm">
+        <!-- TAB 1: Downloads & Automation -->
+        <div id="settings-tab-content-downloads" class="space-y-4">
+          <!-- Default Download Directory -->
+          <div class="space-y-1.5">
+            <label class="font-semibold text-primary">Default Download Directory</label>
+            <div class="flex items-center gap-2">
+              <input type="text" id="set-default-download-dir" class="flex-1 px-3.5 py-2 rounded-xl bg-panel border border-stroke text-primary font-mono text-xs outline-none focus:border-emerald-500/50" />
+              <button type="button" onclick="browseSettingsFolder('set-default-download-dir')" class="px-3.5 py-2 rounded-xl bg-panel hover:bg-surface border border-stroke text-secondary hover:text-primary transition-colors shrink-0 font-medium">Browse...</button>
+            </div>
+          </div>
+
+          <!-- Temp Chunk Directory -->
+          <div class="space-y-1.5">
+            <div class="flex items-center justify-between">
+              <label class="font-semibold text-primary">Temp Chunk Directory (Optional)</label>
+              <span class="text-xs text-secondary">Staging folder for .part files</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <input type="text" id="set-temp-chunk-dir" placeholder="Leave blank to download directly to destination" class="flex-1 px-3.5 py-2 rounded-xl bg-panel border border-stroke text-primary font-mono text-xs outline-none focus:border-emerald-500/50" />
+              <button type="button" onclick="browseSettingsFolder('set-temp-chunk-dir')" class="px-3.5 py-2 rounded-xl bg-panel hover:bg-surface border border-stroke text-secondary hover:text-primary transition-colors shrink-0 font-medium">Browse...</button>
+            </div>
+          </div>
+
+          <!-- Limits Grid -->
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+            <div class="p-3.5 rounded-xl bg-panel border border-stroke space-y-1">
+              <label class="font-semibold text-primary">Max Parallel Files</label>
+              <input type="number" id="set-max-parallel-downloads" min="1" max="10" class="w-full px-3 py-1.5 rounded-lg bg-surface border border-stroke text-primary font-mono text-sm tabular-nums outline-none focus:border-emerald-500/50" />
+              <span class="text-xs text-secondary block">Range: 1 - 10 (Default: 3)</span>
+            </div>
+
+            <div class="p-3.5 rounded-xl bg-panel border border-stroke space-y-1">
+              <label class="font-semibold text-primary">Slots Per File</label>
+              <input type="number" id="set-slots-per-file" min="1" max="24" class="w-full px-3 py-1.5 rounded-lg bg-surface border border-stroke text-primary font-mono text-sm tabular-nums outline-none focus:border-emerald-500/50" />
+              <span class="text-xs text-secondary block">Workers: 1 - 24 (Default: 6)</span>
+            </div>
+
+            <div class="p-3.5 rounded-xl bg-panel border border-stroke space-y-1">
+              <label class="font-semibold text-primary">Speed Limit (KB/s)</label>
+              <input type="number" id="set-speed-limit-kbps" min="0" step="100" class="w-full px-3 py-1.5 rounded-lg bg-surface border border-stroke text-primary font-mono text-sm tabular-nums outline-none focus:border-emerald-500/50" />
+              <span class="text-xs text-secondary block">0 = Unlimited</span>
+            </div>
+          </div>
+
+          <!-- Toggles List -->
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2">
+            <label class="flex items-center justify-between p-3.5 rounded-xl bg-panel border border-stroke cursor-pointer hover:border-stroke-strong transition-colors">
+              <div>
+                <span class="font-semibold text-primary block">Verify file integrity</span>
+                <span class="text-xs text-secondary">Check file hash when download finishes</span>
+              </div>
+              <input type="checkbox" id="set-verify-cbc-mac" class="h-4 w-4 rounded border-stroke bg-surface text-emerald-500 focus:ring-0" />
+            </label>
+
+            <label class="flex items-center justify-between p-3.5 rounded-xl bg-panel border border-stroke cursor-pointer hover:border-stroke-strong transition-colors">
+              <div>
+                <span class="font-semibold text-primary block">Clipboard Monitor</span>
+                <span class="text-xs text-secondary">Auto-detect copied mega.nz URLs on focus</span>
+              </div>
+              <input type="checkbox" id="set-clipboard-monitor" class="h-4 w-4 rounded border-stroke bg-surface text-emerald-500 focus:ring-0" />
+            </label>
+
+            <label class="flex items-center justify-between p-3.5 rounded-xl bg-panel border border-stroke cursor-pointer hover:border-stroke-strong transition-colors">
+              <div>
+                <span class="font-semibold text-primary block">Auto-Accept Folders</span>
+                <span class="text-xs text-secondary">Queue links immediately, skip confirmation</span>
+              </div>
+              <input type="checkbox" id="set-auto-accept-folders" class="h-4 w-4 rounded border-stroke bg-surface text-emerald-500 focus:ring-0" />
+            </label>
+
+            <label class="flex items-center justify-between p-3.5 rounded-xl bg-panel border border-stroke cursor-pointer hover:border-stroke-strong transition-colors">
+              <div>
+                <span class="font-semibold text-primary block">Freeze Before Start</span>
+                <span class="text-xs text-secondary">Add queued links in Paused state</span>
+              </div>
+              <input type="checkbox" id="set-freeze-before-start" class="h-4 w-4 rounded border-stroke bg-surface text-emerald-500 focus:ring-0" />
+            </label>
+          </div>
+        </div>
+
+        <!-- TAB 2: SmartProxy & Routing -->
+        <div id="settings-tab-content-proxy" class="space-y-4 hidden">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div class="p-3.5 rounded-xl bg-panel border border-stroke space-y-1.5">
+              <label class="font-semibold text-primary">Routing Mode</label>
+              <select id="set-routing-mode" class="w-full px-3 py-1.5 rounded-lg bg-surface border border-stroke text-primary text-sm outline-none focus:border-emerald-500/50">
+                <option value="passive">Passive (509 Quota Fallback)</option>
+                <option value="force_proxy">Force Proxy (All Chunks Through Pool)</option>
+              </select>
+              <span class="text-xs text-secondary block">Passive uses direct connection until 509</span>
+            </div>
+
+            <div class="p-3.5 rounded-xl bg-panel border border-stroke space-y-1.5">
+              <label class="font-semibold text-primary">Proxy Selection Order</label>
+              <select id="set-proxy-selection-order" class="w-full px-3 py-1.5 rounded-lg bg-surface border border-stroke text-primary text-sm outline-none focus:border-emerald-500/50">
+                <option value="sequential">Fastest first</option>
+                <option value="random">Random (Even Distribution)</option>
+              </select>
+              <span class="text-xs text-secondary block">How proxy candidates are picked from pool</span>
+            </div>
+          </div>
+
+          <!-- Timeout & Rotation Grid -->
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="p-3.5 rounded-xl bg-panel border border-stroke space-y-1">
+              <label class="font-semibold text-primary">Sticky 509 Window</label>
+              <input type="number" id="set-sticky-509-seconds" min="10" max="86400" class="w-full px-3 py-1.5 rounded-lg bg-surface border border-stroke text-primary font-mono text-sm tabular-nums outline-none focus:border-emerald-500/50" />
+              <span class="text-xs text-secondary block">Seconds (Default: 3600s)</span>
+            </div>
+
+            <div class="p-3.5 rounded-xl bg-panel border border-stroke space-y-1">
+              <label class="font-semibold text-primary">Proxy Error Ban Time</label>
+              <input type="number" id="set-proxy-ban-seconds" min="0" max="86400" class="w-full px-3 py-1.5 rounded-lg bg-surface border border-stroke text-primary font-mono text-sm tabular-nums outline-none focus:border-emerald-500/50" />
+              <span class="text-xs text-secondary block">Cooldown secs (0 = permanent)</span>
+            </div>
+
+            <div class="p-3.5 rounded-xl bg-panel border border-stroke space-y-1">
+              <label class="font-semibold text-primary">Stall Watchdog Timeout</label>
+              <input type="number" id="set-stall-watchdog-seconds" min="5" max="600" class="w-full px-3 py-1.5 rounded-lg bg-surface border border-stroke text-primary font-mono text-sm tabular-nums outline-none focus:border-emerald-500/50" />
+              <span class="text-xs text-secondary block">0 bytes timeout (Default: 90s)</span>
+            </div>
+          </div>
+
+          <!-- Reset Proxy Per Chunk Toggle -->
+          <label class="flex items-center justify-between p-3.5 rounded-xl bg-panel border border-stroke cursor-pointer hover:border-stroke-strong transition-colors">
+            <div>
+              <span class="font-semibold text-primary block">Reset Proxy Per Chunk</span>
+              <span class="text-xs text-secondary">Pick fresh proxy for each chunk so workers never stay stuck on slow nodes</span>
+            </div>
+            <input type="checkbox" id="set-reset-proxy-per-chunk" class="h-4 w-4 rounded border-stroke bg-surface text-emerald-500 focus:ring-0" />
+          </label>
+
+          <!-- Upstream Proxy -->
+          <div class="space-y-1.5">
+            <label class="font-semibold text-primary">Global Upstream Proxy (Optional)</label>
+            <input type="text" id="set-upstream-proxy" placeholder="e.g. socks5://127.0.0.1:9050 or http://user:pass@host:port" class="w-full px-3.5 py-2 rounded-xl bg-panel border border-stroke text-primary font-mono text-xs outline-none focus:border-emerald-500/50" />
+            <span class="text-xs text-secondary block">All outbound requests will route through this proxy first if configured</span>
+          </div>
+        </div>
+
+        <!-- TAB 3: Hooks & Backup -->
+        <div id="settings-tab-content-hooks" class="space-y-4 hidden">
+          <!-- Command on 509 -->
+          <div class="space-y-1.5">
+            <label class="font-semibold text-primary">Command on 509 limit</label>
+            <input type="text" id="set-cmd-on-509-limit" placeholder="e.g. powershell -c &quot;msg * 'MEGA 509 Hit!'&quot;" class="w-full px-3.5 py-2 rounded-xl bg-panel border border-stroke text-primary font-mono text-xs outline-none focus:border-emerald-500/50" />
+            <span class="text-xs text-secondary block">Runs once per cooldown window when MEGA hits a quota limit</span>
+          </div>
+
+          <!-- Command on All Finished -->
+          <div class="space-y-1.5">
+            <label class="font-semibold text-primary">Command on All Downloads Finished</label>
+            <input type="text" id="set-cmd-on-all-finished" placeholder="e.g. powershell -c &quot;msg * 'Looker downloads finished!'&quot;" class="w-full px-3.5 py-2 rounded-xl bg-panel border border-stroke text-primary font-mono text-xs outline-none focus:border-emerald-500/50" />
+            <span class="text-xs text-secondary block">Executed when active queue hits 0 remaining downloading tasks</span>
+          </div>
+
+          <!-- Backup & Restore Actions -->
+          <div class="p-4 rounded-xl bg-panel border border-stroke space-y-3 pt-3">
+            <span class="font-semibold text-primary block">Backup &amp; Reset</span>
+            <div class="flex flex-wrap items-center gap-2.5">
+              <button type="button" onclick="exportSettings()" class="px-3.5 py-2 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 transition-colors flex items-center gap-1.5 font-medium">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+                <span>Export Settings (.json)</span>
+              </button>
+              <label class="px-3.5 py-2 rounded-xl bg-surface hover:bg-panel border border-stroke text-secondary hover:text-primary transition-colors flex items-center gap-1.5 cursor-pointer font-medium">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+                <span>Import Settings (.json)</span>
+                <input type="file" accept=".json" onchange="importSettingsFile(event)" class="hidden" />
+              </label>
+              <button type="button" onclick="resetSettingsToDefaults()" class="px-3.5 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/25 transition-colors ml-auto font-medium">
+                Reset to Defaults
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Settings Footer -->
+      <div class="flex items-center justify-between p-4 border-t border-stroke bg-panel">
+        <span id="settings-save-status" class="text-xs text-emerald-400 font-mono hidden">Settings saved successfully!</span>
+        <div class="flex items-center gap-2.5 ml-auto">
+          <button type="button" onclick="closeSettingsModal()" class="px-4 py-2 rounded-xl bg-surface hover:bg-panel border border-stroke text-secondary text-sm font-semibold transition-colors">
+            Cancel
+          </button>
+          <button type="button" onclick="saveSettingsModal()" id="btn-save-settings" class="px-6 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-[#0c0d10] text-sm font-bold transition-all shadow-lg shadow-emerald-500/20 active:scale-[0.98]">
+            Save &amp; Apply Settings
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Manual Proxy Import Modal -->
+  <div id="import-modal" class="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md hidden p-4">
+    <div class="w-full max-w-xl flex flex-col rounded-2xl bg-surface border border-stroke-strong shadow-2xl overflow-hidden">
+      <div class="flex items-center justify-between p-4 border-b border-stroke bg-panel">
+        <div class="flex items-center gap-2.5">
+          <span class="p-2 rounded-xl bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+          </span>
+          <h3 class="text-base font-bold text-primary tracking-tight">Import Proxies</h3>
+        </div>
+        <button onclick="closeImportModal()" class="p-2 rounded-lg text-secondary hover:text-primary hover:bg-white/10 transition-colors">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+      </div>
+
+      <div class="p-5 space-y-3 text-sm">
+        <p class="text-xs text-secondary">Paste proxy lines below (one per line). Supported schemes: <code>proto://host:port</code> (e.g. <code>socks5://1.2.3.4:1080</code>, <code>http://1.2.3.4:8080</code>) or raw <code>host:port</code>.</p>
+        <textarea
+          id="import-proxies-input"
+          rows="8"
+          placeholder="socks5://127.0.0.1:9050&#10;192.168.1.100:8080&#10;socks4://10.0.0.5:1080"
+          class="w-full px-3.5 py-2.5 rounded-xl bg-panel border border-stroke text-xs text-primary outline-none focus:border-emerald-500/50 mono resize-none"
+        ></textarea>
+        <div id="import-result" class="hidden text-xs mono p-2.5 rounded-lg"></div>
+      </div>
+
+      <div class="flex items-center justify-end gap-2.5 p-4 border-t border-stroke bg-panel">
+        <button onclick="closeImportModal()" class="px-4 py-2 rounded-xl bg-surface hover:bg-panel border border-stroke text-secondary text-sm font-semibold transition-colors">Cancel</button>
+        <button onclick="submitImportProxies()" id="btn-submit-import" class="px-5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-[#0c0d10] font-bold text-sm transition-all shadow-lg shadow-emerald-500/20">Import Now</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Minimal Footer Bar -->
+  <footer class="p-4 border-t border-stroke bg-surface flex items-center justify-center text-xs">
+    <div class="text-secondary mono">
+      Looker v0.1.0 &middot; MIT License &middot; <a href="https://github.com/x7ssss/looker" target="_blank" rel="noopener noreferrer" class="text-secondary hover:text-primary transition-colors underline decoration-secondary/50">github.com/x7ssss/looker</a>
+    </div>
   </footer>
 
+  <!-- ============================================================ -->
+  <!-- JAVASCRIPT APPLICATION CONTROLLER                            -->
+  <!-- ============================================================ -->
   <script>
-    let allProxies = [];
-    let currentProto = 'all';
-    let inspectedData = null;
-    let selectedHandles = new Set();
-    let defaultBaseDir = './downloads';
+    let activeView = 'downloader'; // 'downloader' | 'pool'
+    let proxiesCache = [];
+    let currentProtoFilter = 'all';
+    let baseDownloadDir = './downloads';
     let currentCategory = '';
+    let currentUrlToDownload = '';
+    let currentInspectData = null;
 
-    function joinPath(base, sub) {
-      if (!sub) return base;
-      if (!base) return sub;
-      const sep = base.includes('\\') ? '\\' : '/';
-      const cleanBase = base.endsWith('/') || base.endsWith('\\') ? base.slice(0, -1) : base;
-      return `${cleanBase}${sep}${sub}`;
+    // Downloader live settings
+    let downloaderConfig = {
+      routing_mode: 'passive',
+      workers_per_file: 6,
+      max_concurrent_files: 2,
+      speed_limit_mbps: 0
+    };
+
+    // MegaBasterd tree state
+    let originalTreeNodes = [];
+    let activeTreeNodes = [];
+    let checkedHandles = new Set();
+    let highlightedHandles = new Set();
+    let collapsedFolderPaths = new Set();
+    let lastClickedHandle = null;
+    let treeFilterQuery = '';
+
+    // Debug live console state
+    let isDebugConsoleOpen = false;
+    let debugPollInterval = null;
+    let debugLogsCache = [];
+    let debugFilterQuery = '';
+
+    function formatBytes(bytes) {
+      if (!bytes || bytes === 0) return '0 B';
+      const k = 1024;
+      const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return (bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i];
     }
 
-    function updateDestinationPath() {
-      const input = document.getElementById('output-dir-input');
-      if (input) {
-        input.value = joinPath(defaultBaseDir, currentCategory);
+    // ============================================================
+    // VIEW SWITCHER & DROPDOWNS
+    // ============================================================
+    function switchView(view) {
+      activeView = view;
+      const btnDownloader = document.getElementById('tab-btn-downloader');
+      const btnPool = document.getElementById('tab-btn-pool');
+      const viewDownloader = document.getElementById('view-downloader');
+      const viewPool = document.getElementById('view-pool');
+
+      if (view === 'downloader') {
+        btnDownloader.className = 'flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-semibold transition-all bg-panel text-primary shadow-sm border border-stroke';
+        btnPool.className = 'flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-all text-secondary hover:text-primary';
+        viewDownloader.classList.remove('hidden');
+        viewPool.classList.add('hidden');
+      } else {
+        btnPool.className = 'flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-semibold transition-all bg-panel text-primary shadow-sm border border-stroke';
+        btnDownloader.className = 'flex items-center gap-2 px-4 py-1.5 rounded-lg text-sm font-medium transition-all text-secondary hover:text-primary';
+        viewPool.classList.remove('hidden');
+        viewDownloader.classList.add('hidden');
+        fetchProxies();
       }
     }
 
-    function setCategory(cat) {
-      currentCategory = cat;
-      const pills = {
-        '': document.getElementById('cat-general'),
-        'Media': document.getElementById('cat-media'),
-        'Software': document.getElementById('cat-software'),
-        'Games': document.getElementById('cat-games'),
-        'Archives': document.getElementById('cat-archives'),
-      };
+    function toggleDropdown(id) {
+      const el = document.getElementById(id);
+      const isClosed = el.classList.contains('hidden');
+      closeDropdowns();
+      if (isClosed) {
+        el.classList.remove('hidden');
+      }
+    }
 
-      for (const [key, btn] of Object.entries(pills)) {
-        if (!btn) continue;
-        if (key === cat) {
-          btn.className = 'cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-white/15 text-white border border-white/25';
-        } else {
-          btn.className = 'cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke';
+    function closeDropdowns() {
+      document.querySelectorAll('#debug-dropdown, #export-dropdown').forEach(d => d.classList.add('hidden'));
+    }
+
+    window.addEventListener('click', (e) => {
+      if (!e.target.closest('#debug-dropdown') && !e.target.closest('[onclick*="toggleDropdown(\'debug-dropdown\')"]') &&
+          !e.target.closest('#export-dropdown') && !e.target.closest('[onclick*="toggleDropdown(\'export-dropdown\')"]')) {
+        closeDropdowns();
+      }
+    });
+
+    // ============================================================
+    // LIVE DEBUG CONSOLE CONTROLLER
+    // ============================================================
+    function toggleDebugConsole(explicitState) {
+      const drawer = document.getElementById('debug-console-drawer');
+      isDebugConsoleOpen = explicitState !== undefined ? explicitState : !isDebugConsoleOpen;
+
+      if (isDebugConsoleOpen) {
+        drawer.classList.remove('translate-y-full');
+        fetchDebugLogs();
+        if (!debugPollInterval) {
+          debugPollInterval = setInterval(fetchDebugLogs, 1000);
+        }
+      } else {
+        drawer.classList.add('translate-y-full');
+        if (debugPollInterval) {
+          clearInterval(debugPollInterval);
+          debugPollInterval = null;
         }
       }
-      updateDestinationPath();
+    }
+
+    async function fetchDebugLogs() {
+      try {
+        const res = await fetch('/api/debug/logs?limit=300');
+        if (!res.ok) return;
+        debugLogsCache = await res.json();
+        renderDebugLogs();
+      } catch (e) {}
+    }
+
+    function onDebugFilterInput(val) {
+      debugFilterQuery = val.trim().toLowerCase();
+      renderDebugLogs();
+    }
+
+    function renderDebugLogs() {
+      const container = document.getElementById('debug-logs-container');
+      const countEl = document.getElementById('debug-log-count');
+      const autoScroll = document.getElementById('debug-autoscroll').checked;
+
+      let filtered = debugLogsCache;
+      if (debugFilterQuery) {
+        filtered = filtered.filter(l =>
+          (l.message && l.message.toLowerCase().includes(debugFilterQuery)) ||
+          (l.target && l.target.toLowerCase().includes(debugFilterQuery)) ||
+          (l.level && l.level.toLowerCase().includes(debugFilterQuery))
+        );
+      }
+
+      countEl.textContent = filtered.length;
+
+      if (filtered.length === 0) {
+        container.innerHTML = '<div class="text-secondary text-center py-8">No matching debug logs</div>';
+        return;
+      }
+
+      container.innerHTML = filtered.map(l => {
+        let levelBadge = '';
+        const lvl = (l.level || 'INFO').toUpperCase();
+        if (lvl === 'ERROR') {
+          levelBadge = '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-rose-500/20 text-rose-400 border border-rose-500/30">ERROR</span>';
+        } else if (lvl === 'WARN') {
+          levelBadge = '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-amber-500/20 text-amber-400 border border-amber-500/30">WARN</span>';
+        } else if (lvl === 'DEBUG') {
+          levelBadge = '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-purple-500/20 text-purple-400 border border-purple-500/30">DEBUG</span>';
+        } else {
+          levelBadge = '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-emerald-500/20 text-emerald-400 border border-emerald-500/30">INFO</span>';
+        }
+
+        const targetBadge = l.target ? `<span class="text-secondary">[${l.target}]</span>` : '';
+        const timeStr = l.timestamp ? `<span class="text-secondary tabular-nums">[${l.timestamp}]</span>` : '';
+
+        return `
+          <div class="flex items-start gap-2 leading-relaxed hover:bg-white/[0.02] px-1 rounded transition-colors break-all">
+            ${timeStr}
+            ${levelBadge}
+            ${targetBadge}
+            <span class="text-primary flex-1">${escapeHtml(l.message)}</span>
+          </div>
+        `;
+      }).join('');
+
+      if (autoScroll) {
+        container.scrollTop = container.scrollHeight;
+      }
+    }
+
+    async function clearDebugLogs() {
+      try {
+        await fetch('/api/debug/clear', { method: 'POST' });
+        debugLogsCache = [];
+        renderDebugLogs();
+      } catch (e) {}
+    }
+
+    function copyDebugLogs() {
+      if (debugLogsCache.length === 0) return;
+      const text = debugLogsCache.map(l => `[${l.timestamp}] [${l.level}] [${l.target}] ${l.message}`).join('\n');
+      navigator.clipboard.writeText(text);
+      alert('Debug logs copied to clipboard!');
+    }
+
+    async function saveDebugLog() {
+      try {
+        const res = await fetch('/api/debug/logs?limit=2000');
+        if (!res.ok) return;
+        const logs = await res.json();
+        const text = logs.map(l => `[${l.timestamp}] [${l.level}] [${l.target}] ${l.message}`).join('\n');
+        const blob = new Blob([text], { type: 'text/plain' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `looker-debug-${new Date().toISOString().replace(/[:.]/g, '-')}.log`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        alert('Failed to save debug log: ' + e.message);
+      }
+    }
+
+    async function toggleDevTools() {
+      try {
+        await fetch('/api/system/open-devtools', { method: 'POST' });
+      } catch (e) {}
+    }
+
+    // Keyboard Shortcuts (Ctrl+Shift+D for live console, F12 / Ctrl+Shift+I for DevTools)
+    window.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'D' || e.key === 'd')) {
+        e.preventDefault();
+        toggleDebugConsole();
+      } else if (e.key === 'F12' || ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === 'I' || e.key === 'i'))) {
+        toggleDevTools();
+      }
+    });
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+
+    // ============================================================
+    // SETTINGS MODAL & STATE
+    // ============================================================
+    let appSettings = null;
+    let lastProcessedClipboardUrl = '';
+
+    async function fetchSettings() {
+      try {
+        const res = await fetch('/api/settings');
+        if (res.ok) {
+          appSettings = await res.json();
+          baseDownloadDir = appSettings.default_download_dir;
+          updateOutputDirInput();
+          downloaderConfig.routing_mode = appSettings.routing_mode;
+          downloaderConfig.workers_per_file = appSettings.slots_per_file;
+          downloaderConfig.max_concurrent_files = appSettings.max_parallel_downloads;
+          downloaderConfig.speed_limit_mbps = appSettings.speed_limit_kbps > 0 ? (appSettings.speed_limit_kbps / 1024.0) : 0;
+          renderConfigUI();
+        }
+      } catch (e) {}
+    }
+
+    async function openSettingsModal() {
+      if (!appSettings) {
+        await fetchSettings();
+      }
+      if (appSettings) {
+        populateSettingsModalInputs(appSettings);
+      }
+      switchSettingsTab('downloads');
+      document.getElementById('settings-save-status').classList.add('hidden');
+      document.getElementById('settings-modal').classList.remove('hidden');
+    }
+
+    function closeSettingsModal() {
+      document.getElementById('settings-modal').classList.add('hidden');
+    }
+
+    function switchSettingsTab(tab) {
+      const tabs = ['downloads', 'proxy', 'hooks'];
+      tabs.forEach(t => {
+        const btn = document.getElementById(`settings-tab-btn-${t}`);
+        const content = document.getElementById(`settings-tab-content-${t}`);
+        if (t === tab) {
+          btn.className = 'px-3.5 py-2 border-b-2 border-emerald-400 text-emerald-300 font-semibold transition-colors flex items-center gap-2';
+          content.classList.remove('hidden');
+        } else {
+          btn.className = 'px-3.5 py-2 border-b-2 border-transparent text-secondary hover:text-primary transition-colors flex items-center gap-2';
+          content.classList.add('hidden');
+        }
+      });
+    }
+
+    function populateSettingsModalInputs(s) {
+      document.getElementById('set-default-download-dir').value = s.default_download_dir || baseDownloadDir || '';
+      document.getElementById('set-temp-chunk-dir').value = s.temp_chunk_dir || '';
+      document.getElementById('set-max-parallel-downloads').value = s.max_parallel_downloads ?? 3;
+      document.getElementById('set-slots-per-file').value = s.slots_per_file ?? 6;
+      document.getElementById('set-speed-limit-kbps').value = s.speed_limit_kbps ?? 0;
+      document.getElementById('set-verify-cbc-mac').checked = s.verify_cbc_mac !== false;
+      document.getElementById('set-clipboard-monitor').checked = !!s.clipboard_monitor;
+      document.getElementById('set-auto-accept-folders').checked = !!s.auto_accept_folders;
+      document.getElementById('set-freeze-before-start').checked = !!s.freeze_before_start;
+
+      document.getElementById('set-routing-mode').value = s.routing_mode === 'force_proxy' ? 'force_proxy' : 'passive';
+      document.getElementById('set-proxy-selection-order').value = s.proxy_selection_order === 'random' ? 'random' : 'sequential';
+      document.getElementById('set-reset-proxy-per-chunk').checked = s.reset_proxy_per_chunk !== false;
+      document.getElementById('set-sticky-509-seconds').value = s.sticky_509_seconds ?? 3600;
+      document.getElementById('set-proxy-ban-seconds').value = s.proxy_ban_seconds ?? 300;
+      document.getElementById('set-stall-watchdog-seconds').value = s.stall_watchdog_seconds ?? 90;
+      document.getElementById('set-upstream-proxy').value = s.upstream_proxy || '';
+
+      document.getElementById('set-cmd-on-509-limit').value = s.cmd_on_509_limit || '';
+      document.getElementById('set-cmd-on-all-finished').value = s.cmd_on_all_finished || '';
+    }
+
+    async function browseSettingsFolder(targetInputId) {
+      try {
+        const res = await fetch('/api/system/pick-folder', { method: 'POST' });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.path) {
+            document.getElementById(targetInputId).value = data.path;
+          }
+        }
+      } catch (e) {}
+    }
+
+    async function saveSettingsModal() {
+      const btn = document.getElementById('btn-save-settings');
+      btn.disabled = true;
+
+      const newSettings = {
+        default_download_dir: document.getElementById('set-default-download-dir').value.trim() || baseDownloadDir,
+        temp_chunk_dir: document.getElementById('set-temp-chunk-dir').value.trim() || null,
+        max_parallel_downloads: parseInt(document.getElementById('set-max-parallel-downloads').value, 10) || 3,
+        slots_per_file: parseInt(document.getElementById('set-slots-per-file').value, 10) || 6,
+        speed_limit_kbps: parseInt(document.getElementById('set-speed-limit-kbps').value, 10) || 0,
+        verify_cbc_mac: document.getElementById('set-verify-cbc-mac').checked,
+        clipboard_monitor: document.getElementById('set-clipboard-monitor').checked,
+        auto_accept_folders: document.getElementById('set-auto-accept-folders').checked,
+        freeze_before_start: document.getElementById('set-freeze-before-start').checked,
+        routing_mode: document.getElementById('set-routing-mode').value,
+        proxy_selection_order: document.getElementById('set-proxy-selection-order').value,
+        reset_proxy_per_chunk: document.getElementById('set-reset-proxy-per-chunk').checked,
+        sticky_509_seconds: parseInt(document.getElementById('set-sticky-509-seconds').value, 10) || 3600,
+        proxy_ban_seconds: parseInt(document.getElementById('set-proxy-ban-seconds').value, 10) || 300,
+        stall_watchdog_seconds: parseInt(document.getElementById('set-stall-watchdog-seconds').value, 10) || 90,
+        upstream_proxy: document.getElementById('set-upstream-proxy').value.trim() || null,
+        cmd_on_509_limit: document.getElementById('set-cmd-on-509-limit').value.trim() || null,
+        cmd_on_all_finished: document.getElementById('set-cmd-on-all-finished').value.trim() || null,
+      };
+
+      try {
+        const res = await fetch('/api/settings', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(newSettings),
+        });
+
+        if (res.ok) {
+          appSettings = await res.json();
+          baseDownloadDir = appSettings.default_download_dir;
+          updateOutputDirInput();
+          downloaderConfig.routing_mode = appSettings.routing_mode;
+          downloaderConfig.workers_per_file = appSettings.slots_per_file;
+          downloaderConfig.max_concurrent_files = appSettings.max_parallel_downloads;
+          downloaderConfig.speed_limit_mbps = appSettings.speed_limit_kbps > 0 ? (appSettings.speed_limit_kbps / 1024.0) : 0;
+          renderConfigUI();
+
+          const status = document.getElementById('settings-save-status');
+          status.classList.remove('hidden');
+          setTimeout(() => {
+            closeSettingsModal();
+            status.classList.add('hidden');
+          }, 600);
+        } else {
+          const errData = await res.json();
+          alert('Failed to save settings: ' + (errData.error || 'Server error'));
+        }
+      } catch (e) {
+        alert('Network error saving settings: ' + e.message);
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    function exportSettings() {
+      if (!appSettings) return;
+      const jsonStr = JSON.stringify(appSettings, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'looker-settings.json';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    function importSettingsFile(event) {
+      const file = event.target.files && event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          const imported = JSON.parse(e.target.result);
+          populateSettingsModalInputs(imported);
+          alert('Settings loaded from file! Click "Save & Apply Settings" to commit.');
+        } catch (err) {
+          alert('Failed to parse settings JSON file: ' + err.message);
+        }
+      };
+      reader.readAsText(file);
+      event.target.value = '';
+    }
+
+    async function resetSettingsToDefaults() {
+      if (!confirm('Are you sure you want to reset all settings to factory defaults?')) return;
+      try {
+        const res = await fetch('/api/settings/reset', { method: 'POST' });
+        if (res.ok) {
+          appSettings = await res.json();
+          populateSettingsModalInputs(appSettings);
+          baseDownloadDir = appSettings.default_download_dir;
+          updateOutputDirInput();
+          downloaderConfig.routing_mode = appSettings.routing_mode;
+          downloaderConfig.workers_per_file = appSettings.slots_per_file;
+          downloaderConfig.max_concurrent_files = appSettings.max_parallel_downloads;
+          downloaderConfig.speed_limit_mbps = 0;
+          renderConfigUI();
+          alert('Settings reset to factory defaults.');
+        }
+      } catch (e) {
+        alert('Failed to reset settings: ' + e.message);
+      }
+    }
+
+    // ============================================================
+    // CLIPBOARD AUTO-DETECTION
+    // ============================================================
+    async function checkClipboard() {
+      if (!appSettings || !appSettings.clipboard_monitor) return;
+      if (document.hidden) return;
+      try {
+        const text = await navigator.clipboard.readText();
+        if (!text) return;
+        const trimmed = text.trim();
+        if (!trimmed || trimmed === lastProcessedClipboardUrl) return;
+
+        const isMega = /https?:\/\/(www\.)?mega\.(nz|io)\/(folder\/|file\/|#F!|#!)/i.test(trimmed);
+        if (!isMega) return;
+
+        lastProcessedClipboardUrl = trimmed;
+
+        if (appSettings.auto_accept_folders) {
+          const outDir = appSettings.default_download_dir || baseDownloadDir;
+          const res = await fetch('/api/mega/download', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              url: trimmed,
+              selected_handles: [],
+              output_dir: outDir,
+              category: currentCategory || 'General'
+            })
+          });
+          if (res.ok) {
+            fetchTasks();
+          }
+        } else {
+          const urlInput = document.getElementById('mega-url-input');
+          if (urlInput) {
+            urlInput.value = trimmed;
+          }
+          inspectMegaLink();
+        }
+      } catch (e) {}
+    }
+
+    window.addEventListener('focus', checkClipboard);
+    setInterval(checkClipboard, 2500);
+
+    // ============================================================
+    // LIVE CONFIG CONTROLS
+    // ============================================================
+    async function fetchConfig() {
+      try {
+        const res = await fetch('/api/mega/config');
+        if (res.ok) {
+          downloaderConfig = await res.json();
+          renderConfigUI();
+        }
+      } catch (e) {}
+    }
+
+    function renderConfigUI() {
+      const modePassive = document.getElementById('mode-passive');
+      const modeForce = document.getElementById('mode-force');
+      if (downloaderConfig.routing_mode === 'force_proxy') {
+        modeForce.className = 'px-3 py-1 rounded-md text-xs font-semibold mono transition-colors bg-white/15 text-primary shadow-sm';
+        modePassive.className = 'px-3 py-1 rounded-md text-xs font-semibold mono transition-colors text-secondary hover:text-primary';
+      } else {
+        modePassive.className = 'px-3 py-1 rounded-md text-xs font-semibold mono transition-colors bg-white/15 text-primary shadow-sm';
+        modeForce.className = 'px-3 py-1 rounded-md text-xs font-semibold mono transition-colors text-secondary hover:text-primary';
+      }
+
+      document.getElementById('cfg-workers').value = downloaderConfig.workers_per_file || 6;
+      document.getElementById('cfg-max-files').value = downloaderConfig.max_concurrent_files || 2;
+      document.getElementById('cfg-speed-limit').value = downloaderConfig.speed_limit_mbps || 0;
+    }
+
+    async function setRoutingMode(mode) {
+      downloaderConfig.routing_mode = mode;
+      await saveConfig();
+    }
+
+    async function saveConfig() {
+      const workers = parseInt(document.getElementById('cfg-workers').value, 10) || 6;
+      const maxFiles = parseInt(document.getElementById('cfg-max-files').value, 10) || 2;
+      const speedLimit = parseFloat(document.getElementById('cfg-speed-limit').value) || 0.0;
+
+      downloaderConfig.workers_per_file = Math.max(1, Math.min(24, workers));
+      downloaderConfig.max_concurrent_files = Math.max(1, Math.min(5, maxFiles));
+      downloaderConfig.speed_limit_mbps = Math.max(0.0, speedLimit);
+
+      renderConfigUI();
+
+      try {
+        await fetch('/api/mega/config', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(downloaderConfig)
+        });
+      } catch (e) {}
     }
 
     async function fetchDefaultDir() {
@@ -326,85 +1402,81 @@
         if (res.ok) {
           const data = await res.json();
           if (data.base_dir) {
-            defaultBaseDir = data.base_dir;
-            updateDestinationPath();
+            baseDownloadDir = data.base_dir;
+            updateOutputDirInput();
           }
         }
       } catch (e) {}
     }
 
+    function updateOutputDirInput() {
+      const input = document.getElementById('output-dir-input');
+      if (!input) return;
+      if (currentCategory) {
+        input.value = `${baseDownloadDir}/${currentCategory}`.replace(/\/+/g, '/');
+      } else {
+        input.value = baseDownloadDir;
+      }
+    }
+
+    function setCategory(cat) {
+      currentCategory = cat;
+      const pills = document.querySelectorAll('.cat-pill');
+      pills.forEach(p => {
+        p.className = 'cat-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-surface text-secondary hover:text-primary border border-stroke';
+      });
+
+      const activeId = cat ? `cat-${cat.toLowerCase()}` : 'cat-general';
+      const activeBtn = document.getElementById(activeId);
+      if (activeBtn) {
+        activeBtn.className = 'cat-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-white/15 text-primary border border-white/20';
+      }
+      updateOutputDirInput();
+    }
+
     async function browseFolder() {
-      const btn = document.getElementById('btn-browse-folder');
-      if (btn) btn.disabled = true;
       try {
         const res = await fetch('/api/system/pick-folder', { method: 'POST' });
         if (res.ok) {
           const data = await res.json();
           if (data.path) {
-            document.getElementById('output-dir-input').value = data.path;
-            const pills = document.querySelectorAll('.cat-pill');
-            pills.forEach(p => {
-              p.className = 'cat-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke';
-            });
+            baseDownloadDir = data.path;
+            updateOutputDirInput();
           }
         }
-      } catch (e) {
-        console.error('Folder picker error:', e);
-      } finally {
-        if (btn) btn.disabled = false;
-      }
+      } catch (e) {}
     }
 
-    function formatBytes(bytes) {
-      if (!bytes || bytes === 0) return '0 B';
-      const k = 1024;
-      const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-      const i = Math.floor(Math.log(bytes) / Math.log(k));
-      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-    }
-
-    function setProtoFilter(proto) {
-      currentProto = proto;
-      const pills = {
-        'all': document.getElementById('pill-all'),
-        'SOCKS5': document.getElementById('pill-socks5'),
-        'SOCKS4': document.getElementById('pill-socks4'),
-        'HTTP': document.getElementById('pill-http'),
-      };
-
-      for (const [key, btn] of Object.entries(pills)) {
-        if (!btn) continue;
-        if (key === proto) {
-          btn.className = 'proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-white/15 text-white border border-white/25 shadow-sm';
-        } else {
-          btn.className = 'proto-pill px-2.5 py-1 rounded-md text-xs font-medium mono transition-colors bg-surface text-zinc-400 hover:text-zinc-200 border border-stroke';
-        }
-      }
-      fetchProxies();
-    }
-
+    // ============================================================
+    // STATUS, PROXY POOL & TELEMETRY
+    // ============================================================
     async function fetchStatus() {
       try {
         const res = await fetch('/api/status');
         if (!res.ok) return;
-        const d = await res.json();
-        document.getElementById('metric-healthy').textContent = d.working_count || 0;
-        document.getElementById('metric-checked').textContent = d.checked_count || 0;
-        document.getElementById('metric-total').textContent = d.total_candidates || 0;
-        document.getElementById('metric-latency').textContent = d.avg_latency_ms || 0;
-        document.getElementById('metric-quarantined').textContent = d.quarantined_count || 0;
-        const pct = d.total_candidates > 0 ? Math.min(100, Math.round((d.checked_count / d.total_candidates) * 100)) : 0;
-        document.getElementById('progress-percent').textContent = pct + '%';
-        document.getElementById('progress-bar').style.width = pct + '%';
+        const s = await res.json();
 
-        if (d.healthy_by_proto) {
-          document.getElementById('proto-s5-stat').textContent = d.healthy_by_proto.socks5 || 0;
-          document.getElementById('proto-s4-stat').textContent = d.healthy_by_proto.socks4 || 0;
-          document.getElementById('proto-http-stat').textContent = d.healthy_by_proto.http || 0;
-          document.getElementById('count-socks5').textContent = d.healthy_by_proto.socks5 || 0;
-          document.getElementById('count-socks4').textContent = d.healthy_by_proto.socks4 || 0;
-          document.getElementById('count-http').textContent = d.healthy_by_proto.http || 0;
-          document.getElementById('count-all').textContent = d.working_count || 0;
+        const healthyCount = s.working_count || 0;
+        document.getElementById('metric-healthy').textContent = healthyCount;
+        document.getElementById('topbar-healthy-count').textContent = healthyCount;
+        document.getElementById('metric-checked').textContent = s.checked_count || 0;
+        document.getElementById('metric-total').textContent = s.total_candidates || 0;
+        document.getElementById('metric-latency').textContent = Math.round(s.avg_latency_ms || 0);
+        document.getElementById('metric-quarantined').textContent = s.quarantined_count || 0;
+
+        const pct = s.total_candidates > 0 ? Math.min(100, Math.round((s.checked_count / s.total_candidates) * 100)) : 0;
+        document.getElementById('progress-percent').textContent = `${pct}%`;
+        document.getElementById('progress-bar').style.width = `${pct}%`;
+
+        if (s.healthy_by_proto) {
+          document.getElementById('proto-s5-stat').textContent = s.healthy_by_proto.socks5 || 0;
+          document.getElementById('proto-s4-stat').textContent = s.healthy_by_proto.socks4 || 0;
+          document.getElementById('proto-http-stat').textContent = s.healthy_by_proto.http || 0;
+
+          document.getElementById('count-all').textContent = healthyCount;
+          document.getElementById('count-socks5').textContent = s.healthy_by_proto.socks5 || 0;
+          document.getElementById('count-socks4').textContent = s.healthy_by_proto.socks4 || 0;
+          document.getElementById('count-http').textContent = s.healthy_by_proto.http || 0;
         }
       } catch (e) {}
     }
@@ -413,54 +1485,70 @@
       try {
         const res = await fetch('/api/fastest');
         if (!res.ok) return;
-        const list = await res.json();
-        const container = document.getElementById('fastest-list');
-        if (!list || list.length === 0) return;
-        container.innerHTML = list.map(p => {
-          const countryTag = (p.country_code || p.country) 
-            ? `<span class="text-[10px] mono text-zinc-400 bg-white/5 px-1 rounded">${p.country_code || p.country}</span>` 
-            : '';
-          const protoBadge = p.proto === 'SOCKS5'
-            ? 'bg-violet-500/10 text-violet-400 border border-violet-500/20'
-            : (p.proto === 'SOCKS4' ? 'bg-sky-500/10 text-sky-400 border border-sky-500/20' : 'bg-blue-500/10 text-blue-400 border border-blue-500/20');
+        const nodes = await res.json();
+        const list = document.getElementById('fastest-list');
 
-          return `
-            <div class="flex items-center justify-between p-2 rounded-lg bg-obsidian border border-stroke text-xs">
-              <div class="flex items-center gap-2">
-                <span class="mono text-zinc-200">${p.endpoint}</span>
-                <span class="px-1.5 py-0.5 rounded text-[10px] mono ${protoBadge}">${p.proto}</span>
-                ${countryTag}
-              </div>
-              <span class="mono text-emerald-400 font-medium">${p.latency_ms}ms</span>
+        if (!nodes || nodes.length === 0) {
+          list.innerHTML = '<p class="text-sm text-secondary">No verified proxies yet</p>';
+          return;
+        }
+
+        list.innerHTML = nodes.map(n => `
+          <div class="flex items-center justify-between p-2.5 rounded-xl bg-panel border border-stroke text-sm">
+            <div class="flex items-center gap-2.5 truncate">
+              <span class="px-2 py-0.5 rounded text-xs mono bg-emerald-500/10 text-emerald-400 font-semibold border border-emerald-500/20">${n.proto}</span>
+              <span class="mono text-primary truncate text-xs">${n.endpoint}</span>
             </div>
-          `;
-        }).join('');
+            <span class="mono tabular-nums text-emerald-400 font-semibold text-xs shrink-0">${n.latency_ms}ms</span>
+          </div>
+        `).join('');
       } catch (e) {}
     }
 
     async function fetchProxies() {
       try {
-        const protoParam = currentProto === 'all' ? '' : `&proto=${encodeURIComponent(currentProto.toLowerCase())}`;
-        const res = await fetch(`/api/proxies?limit=100${protoParam}`);
+        const url = currentProtoFilter === 'all' 
+          ? '/api/proxies?limit=100' 
+          : `/api/proxies?proto=${currentProtoFilter.toLowerCase()}&limit=100`;
+        const res = await fetch(url);
         if (!res.ok) return;
-        allProxies = await res.json();
+        proxiesCache = await res.json();
         renderTable();
       } catch (e) {}
     }
 
-    function renderTable() {
-      const q = document.getElementById('search-box').value.trim().toLowerCase();
-      const filtered = allProxies.filter(p => {
-        const endpoint = (p.endpoint || '').toLowerCase();
-        const country = (p.country_code || p.country || '').toLowerCase();
-        const proto = (p.proto || '').toLowerCase();
-        const anonymity = (p.anonymity || '').toLowerCase();
-        return endpoint.includes(q) || country.includes(q) || proto.includes(q) || anonymity.includes(q);
+    function setProtoFilter(proto) {
+      currentProtoFilter = proto;
+      const pills = document.querySelectorAll('.proto-pill');
+      pills.forEach(p => {
+        p.className = 'proto-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-panel text-secondary hover:text-primary border border-stroke';
       });
+
+      const activeId = proto === 'all' ? 'pill-all' : `pill-${proto.toLowerCase()}`;
+      const activeBtn = document.getElementById(activeId);
+      if (activeBtn) {
+        activeBtn.className = 'proto-pill px-3 py-1 rounded-lg text-xs font-medium mono transition-colors bg-white/15 text-primary border border-white/20 shadow-sm';
+      }
+
+      fetchProxies();
+    }
+
+    function renderTable() {
+      const q = (document.getElementById('search-box').value || '').toLowerCase();
+      let filtered = proxiesCache;
+
+      if (q) {
+        filtered = filtered.filter(p => 
+          (p.endpoint && p.endpoint.toLowerCase().includes(q)) ||
+          (p.country && p.country.toLowerCase().includes(q)) ||
+          (p.country_code && p.country_code.toLowerCase().includes(q)) ||
+          (p.proto && p.proto.toLowerCase().includes(q))
+        );
+      }
 
       const tbody = document.getElementById('proxy-table-body');
       if (filtered.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" class="py-6 text-center text-zinc-500">No matching proxies</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5" class="py-8 text-center text-secondary">No matching proxies</td></tr>';
         return;
       }
 
@@ -475,19 +1563,26 @@
 
         return `
           <tr class="hover:bg-white/[0.02] transition-colors">
-            <td class="py-2.5 mono text-zinc-200">${p.endpoint}</td>
-            <td class="py-2.5"><span class="px-1.5 py-0.5 rounded text-[10px] mono ${protoClass}">${p.proto}</span></td>
-            <td class="py-2.5 text-zinc-300 mono font-medium">${countryDisplay}</td>
-            <td class="py-2.5 mono ${latencyClass}">${p.latency_ms}ms</td>
-            <td class="py-2.5 text-zinc-400 text-[11px]">${p.anonymity || 'Elite'}</td>
+            <td class="py-3 px-1 mono text-primary font-medium text-xs">${p.endpoint}</td>
+            <td class="py-3 px-1"><span class="px-2 py-0.5 rounded text-xs mono ${protoClass}">${p.proto}</span></td>
+            <td class="py-3 px-1 text-primary mono text-xs">${countryDisplay}</td>
+            <td class="py-3 px-1 mono tabular-nums text-xs font-semibold ${latencyClass}">${p.latency_ms}ms</td>
+            <td class="py-3 px-1 text-secondary text-xs">${p.anonymity || 'Elite'}</td>
           </tr>
         `;
       }).join('');
     }
 
+    // ============================================================
+    // MEGABASTERD-STYLE FOLDER TREE & LINK INSPECTOR
+    // ============================================================
     async function inspectMegaLink() {
-      const url = document.getElementById('mega-url-input').value.trim();
-      if (!url) return;
+      const rawText = document.getElementById('mega-url-input').value.trim();
+      if (!rawText) return;
+
+      const lines = rawText.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+      if (lines.length === 0) return;
+
       const btn = document.getElementById('btn-inspect');
       const spinner = document.getElementById('inspect-spinner');
       const btnText = document.getElementById('inspect-btn-text');
@@ -495,14 +1590,15 @@
 
       errorBox.classList.add('hidden');
       spinner.classList.remove('hidden');
-      btnText.textContent = 'Inspecting...';
+      btnText.textContent = lines.length > 1 ? `Inspecting 1 of ${lines.length}...` : 'Inspecting...';
       btn.disabled = true;
 
       try {
+        currentUrlToDownload = lines[0];
         const res = await fetch('/api/mega/inspect', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url })
+          body: JSON.stringify({ url: currentUrlToDownload })
         });
         const data = await res.json();
         if (!res.ok) {
@@ -511,106 +1607,350 @@
           return;
         }
 
-        inspectedData = data;
-        renderInspectorResult();
+        currentInspectData = data;
+        openFolderModal(data);
       } catch (e) {
         errorBox.textContent = 'Network error connecting to gateway: ' + e.message;
         errorBox.classList.remove('hidden');
       } finally {
         spinner.classList.add('hidden');
-        btnText.textContent = 'Inspect Link';
+        btnText.textContent = 'Inspect Links';
         btn.disabled = false;
       }
     }
 
-    function renderInspectorResult() {
-      const container = document.getElementById('inspect-result-container');
-      if (!inspectedData) {
-        container.classList.add('hidden');
-        return;
+    function openFolderModal(data) {
+      document.getElementById('modal-folder-title').textContent = data.title || 'FolderLink';
+      document.getElementById('modal-type-badge').textContent = data.type ? data.type.toUpperCase() : 'FOLDER';
+
+      originalTreeNodes = JSON.parse(JSON.stringify(data.nodes || []));
+      activeTreeNodes = JSON.parse(JSON.stringify(originalTreeNodes));
+
+      checkedHandles.clear();
+      highlightedHandles.clear();
+      collapsedFolderPaths.clear();
+      lastClickedHandle = null;
+      treeFilterQuery = '';
+      document.getElementById('tree-search-filter').value = '';
+
+      for (const n of activeTreeNodes) {
+        checkedHandles.add(n.handle);
       }
-      container.classList.remove('hidden');
-      document.getElementById('inspect-title').textContent = inspectedData.title || 'MEGA Package';
-      document.getElementById('inspect-type-badge').textContent = inspectedData.type ? inspectedData.type.toUpperCase() : 'FILE';
-      document.getElementById('inspect-total-size').textContent = formatBytes(inspectedData.total_size);
 
-      selectedHandles.clear();
-      const fileNodes = (inspectedData.nodes || []).filter(n => !n.is_dir);
-      fileNodes.forEach(n => selectedHandles.add(n.handle));
+      renderTreeModalView();
+      updateOutputDirInput();
+      document.getElementById('folder-tree-modal').classList.remove('hidden');
+    }
 
-      const listContainer = document.getElementById('inspect-nodes-list');
-      if (fileNodes.length === 0) {
-        listContainer.innerHTML = '<p class="text-xs text-zinc-500 py-2">No downloadable files detected.</p>';
+    function closeFolderModal() {
+      document.getElementById('folder-tree-modal').classList.add('hidden');
+    }
+
+    function onTreeFilterInput(val) {
+      treeFilterQuery = val.trim().toLowerCase();
+      renderTreeModalView();
+    }
+
+    function toggleFolderCollapse(folderPath) {
+      if (collapsedFolderPaths.has(folderPath)) {
+        collapsedFolderPaths.delete(folderPath);
       } else {
-        listContainer.innerHTML = fileNodes.map(n => `
-          <label class="flex items-center justify-between p-2 rounded-lg bg-obsidian/70 hover:bg-obsidian border border-stroke text-xs cursor-pointer transition-colors">
-            <div class="flex items-center gap-2.5 truncate mr-2">
-              <input type="checkbox" data-handle="${n.handle}" checked onchange="toggleHandle('${n.handle}', this.checked)" class="rounded bg-surface border-stroke text-emerald-500 focus:ring-0 focus:ring-offset-0 cursor-pointer" />
-              <span class="mono text-zinc-200 truncate" title="${n.path}">${n.path}</span>
-            </div>
-            <span class="mono text-zinc-400 text-[11px] shrink-0">${formatBytes(n.size)}</span>
-          </label>
-        `).join('');
+        collapsedFolderPaths.add(folderPath);
       }
-
-      updateSelectionSummary();
+      renderTreeModalView();
     }
 
-    function toggleHandle(handle, checked) {
-      if (checked) {
-        selectedHandles.add(handle);
-      } else {
-        selectedHandles.delete(handle);
-      }
-      updateSelectionSummary();
-    }
+    function buildTreeHierarchy(nodes) {
+      const root = { name: '', path: '', is_dir: true, children: [], handle: 'root' };
+      const dirMap = new Map();
+      dirMap.set('', root);
 
-    function selectAllHandles(all) {
-      if (!inspectedData) return;
-      const checkboxes = document.querySelectorAll('#inspect-nodes-list input[type="checkbox"]');
-      checkboxes.forEach(cb => {
-        cb.checked = all;
-        const h = cb.getAttribute('data-handle');
-        if (all) selectedHandles.add(h);
-        else selectedHandles.delete(h);
-      });
-      updateSelectionSummary();
-    }
+      const sorted = [...nodes].sort((a, b) => a.path.localeCompare(b.path));
 
-    function updateSelectionSummary() {
-      if (!inspectedData) return;
-      const fileNodes = (inspectedData.nodes || []).filter(n => !n.is_dir);
-      let selectedSize = 0;
-      for (const n of fileNodes) {
-        if (selectedHandles.has(n.handle)) {
-          selectedSize += n.size;
+      for (const node of sorted) {
+        const parts = node.path.split('/').filter(p => p.length > 0);
+        let currPath = '';
+        let parent = root;
+
+        for (let i = 0; i < parts.length; i++) {
+          const part = parts[i];
+          const isLast = i === parts.length - 1;
+          const nextPath = currPath + '/' + part;
+
+          if (isLast && !node.is_dir) {
+            parent.children.push({
+              handle: node.handle,
+              name: node.name,
+              path: node.path,
+              size: node.size,
+              is_dir: false,
+              children: []
+            });
+          } else {
+            if (!dirMap.has(nextPath)) {
+              const dirNode = {
+                handle: node.is_dir && isLast ? node.handle : 'dir_' + nextPath,
+                name: part,
+                path: nextPath,
+                size: 0,
+                is_dir: true,
+                children: []
+              };
+              parent.children.push(dirNode);
+              dirMap.set(nextPath, dirNode);
+            }
+            parent = dirMap.get(nextPath);
+          }
+          currPath = nextPath;
         }
       }
-      document.getElementById('selection-summary-text').textContent = 
-        `Selected: ${selectedHandles.size} / ${fileNodes.length} files (${formatBytes(selectedSize)})`;
-      document.getElementById('btn-start-download').disabled = selectedHandles.size === 0;
+
+      function calcFolderSize(n) {
+        if (!n.is_dir) return n.size;
+        let sum = 0;
+        for (const c of n.children) {
+          sum += calcFolderSize(c);
+        }
+        n.size = sum;
+        return sum;
+      }
+      calcFolderSize(root);
+
+      return root;
     }
 
-    async function startDownload() {
-      if (!inspectedData || selectedHandles.size === 0) return;
-      const url = document.getElementById('mega-url-input').value.trim();
-      const outputDir = document.getElementById('output-dir-input').value.trim() || './downloads';
-      const btn = document.getElementById('btn-start-download');
+    function renderTreeModalView() {
+      const container = document.getElementById('modal-tree-container');
+      const root = buildTreeHierarchy(activeTreeNodes);
+
+      if (activeTreeNodes.length === 0) {
+        container.innerHTML = '<div class="py-8 text-center text-secondary">All items removed. Click "Restore" to reload original tree.</div>';
+        updateModalTotals();
+        return;
+      }
+
+      const rowsHtml = [];
+      const query = treeFilterQuery;
+
+      function renderNode(node, depth, parentCollapsed) {
+        if (node.handle === 'root') {
+          for (const c of node.children) {
+            renderNode(c, depth, false);
+          }
+          return;
+        }
+
+        let matches = true;
+        if (query) {
+          const nameMatches = node.name.toLowerCase().includes(query) || node.path.toLowerCase().includes(query);
+          const hasMatchingChild = node.children.some(c => c.name.toLowerCase().includes(query) || c.path.toLowerCase().includes(query));
+          matches = nameMatches || hasMatchingChild;
+        }
+
+        if (!matches) return;
+
+        const isCollapsed = collapsedFolderPaths.has(node.path);
+        const isChecked = checkedHandles.has(node.handle);
+        const isHighlighted = highlightedHandles.has(node.handle);
+
+        if (!parentCollapsed) {
+          const indent = depth * 20;
+          const chevron = node.is_dir
+            ? `<button type="button" onclick="event.stopPropagation(); toggleFolderCollapse('${node.path}')" class="p-0.5 text-secondary hover:text-primary transition-colors">
+                <svg class="w-3.5 h-3.5 transform transition-transform ${isCollapsed ? '-rotate-90' : ''}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+               </button>`
+            : '<span class="w-3.5 inline-block"></span>';
+
+          const icon = node.is_dir
+            ? '<svg class="w-4 h-4 text-amber-400 shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>'
+            : '<svg class="w-4 h-4 text-emerald-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>';
+
+          rowsHtml.push(`
+            <div 
+              class="tree-row flex items-center justify-between px-3 py-1.5 rounded-lg border border-transparent transition-colors cursor-pointer ${isHighlighted ? 'highlighted' : 'hover:bg-white/[0.04]'}"
+              onclick="onTreeRowClick('${node.handle}', event)"
+              data-handle="${node.handle}"
+              style="padding-left: ${indent + 8}px;"
+            >
+              <div class="flex items-center gap-2 truncate mr-3">
+                ${chevron}
+                <input 
+                  type="checkbox" 
+                  ${isChecked ? 'checked' : ''} 
+                  onclick="event.stopPropagation(); onTreeCheckboxToggle('${node.handle}', this.checked)"
+                  class="rounded bg-surface border-stroke text-emerald-500 focus:ring-0 cursor-pointer"
+                />
+                ${icon}
+                <span class="truncate ${node.is_dir ? 'font-bold text-primary' : 'text-zinc-200'}">${node.name}</span>
+              </div>
+              <span class="mono tabular-nums text-secondary text-xs shrink-0">${formatBytes(node.size)}</span>
+            </div>
+          `);
+        }
+
+        const willChildrenCollapse = parentCollapsed || isCollapsed;
+        for (const c of node.children) {
+          renderNode(c, depth + 1, willChildrenCollapse);
+        }
+      }
+
+      renderNode(root, 0, false);
+      container.innerHTML = rowsHtml.join('');
+      updateModalTotals();
+    }
+
+    function onTreeCheckboxToggle(handle, checked) {
+      const handles = getSubtreeHandles(handle);
+      for (const h of handles) {
+        if (checked) checkedHandles.add(h);
+        else checkedHandles.delete(h);
+      }
+      renderTreeModalView();
+    }
+
+    function onTreeRowClick(handle, event) {
+      if (event.ctrlKey || event.metaKey) {
+        if (highlightedHandles.has(handle)) {
+          highlightedHandles.delete(handle);
+        } else {
+          highlightedHandles.add(handle);
+        }
+      } else if (event.shiftKey && lastClickedHandle) {
+        const allHandles = activeTreeNodes.map(n => n.handle);
+        const idx1 = allHandles.indexOf(lastClickedHandle);
+        const idx2 = allHandles.indexOf(handle);
+        if (idx1 !== -1 && idx2 !== -1) {
+          const start = Math.min(idx1, idx2);
+          const end = Math.max(idx1, idx2);
+          for (let i = start; i <= end; i++) {
+            highlightedHandles.add(allHandles[i]);
+          }
+        }
+      } else {
+        highlightedHandles.clear();
+        highlightedHandles.add(handle);
+      }
+
+      lastClickedHandle = handle;
+      renderTreeModalView();
+    }
+
+    function getSubtreeHandles(handle) {
+      const res = [handle];
+      const targetNode = activeTreeNodes.find(n => n.handle === handle);
+      if (!targetNode) return res;
+
+      const prefix = targetNode.path + '/';
+      for (const n of activeTreeNodes) {
+        if (n.path.startsWith(prefix)) {
+          res.push(n.handle);
+        }
+      }
+      return res;
+    }
+
+    function selectAllTreeItems(all) {
+      checkedHandles.clear();
+      highlightedHandles.clear();
+      if (all) {
+        for (const n of activeTreeNodes) {
+          checkedHandles.add(n.handle);
+        }
+      }
+      renderTreeModalView();
+    }
+
+    function keepSelectedTreeItems() {
+      const targets = new Set([...checkedHandles, ...highlightedHandles]);
+      if (targets.size === 0) return;
+
+      const kept = new Set();
+      for (const h of targets) {
+        const subtree = getSubtreeHandles(h);
+        for (const sub of subtree) kept.add(sub);
+
+        const node = activeTreeNodes.find(n => n.handle === h);
+        if (node) {
+          for (const ancestor of activeTreeNodes) {
+            if (ancestor.is_dir && node.path.startsWith(ancestor.path + '/')) {
+              kept.add(ancestor.handle);
+            }
+          }
+        }
+      }
+
+      activeTreeNodes = activeTreeNodes.filter(n => kept.has(n.handle));
+      checkedHandles = new Set([...checkedHandles].filter(h => kept.has(h)));
+      highlightedHandles.clear();
+      renderTreeModalView();
+    }
+
+    function removeSelectedTreeItems() {
+      const targets = new Set([...checkedHandles, ...highlightedHandles]);
+      if (targets.size === 0) return;
+
+      const toRemove = new Set();
+      for (const h of targets) {
+        const subtree = getSubtreeHandles(h);
+        for (const sub of subtree) toRemove.add(sub);
+      }
+
+      activeTreeNodes = activeTreeNodes.filter(n => !toRemove.has(n.handle));
+      for (const h of toRemove) {
+        checkedHandles.delete(h);
+        highlightedHandles.delete(h);
+      }
+      renderTreeModalView();
+    }
+
+    function restoreTreeData() {
+      activeTreeNodes = JSON.parse(JSON.stringify(originalTreeNodes));
+      checkedHandles.clear();
+      highlightedHandles.clear();
+      for (const n of activeTreeNodes) {
+        checkedHandles.add(n.handle);
+      }
+      renderTreeModalView();
+    }
+
+    function updateModalTotals() {
+      const files = activeTreeNodes.filter(n => !n.is_dir && checkedHandles.has(n.handle));
+      let totalSize = 0;
+      for (const f of files) {
+        totalSize += f.size || 0;
+      }
+
+      document.getElementById('modal-total-size').textContent = formatBytes(totalSize);
+      document.getElementById('modal-files-count').textContent = `Selected: ${files.length} files (${formatBytes(totalSize)})`;
+      document.getElementById('btn-modal-start-download').disabled = files.length === 0;
+    }
+
+    async function startModalDownload() {
+      const files = activeTreeNodes.filter(n => !n.is_dir && checkedHandles.has(n.handle));
+      if (files.length === 0) return;
+
+      const btn = document.getElementById('btn-modal-start-download');
       btn.disabled = true;
+
+      const selectedHandles = files.map(f => f.handle);
+      const outputDir = document.getElementById('output-dir-input').value.trim() || baseDownloadDir;
 
       try {
         const res = await fetch('/api/mega/download', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            url,
-            selected_handles: Array.from(selectedHandles),
-            output_dir: outputDir
+            url: currentUrlToDownload,
+            selected_handles: selectedHandles,
+            output_dir: outputDir,
+            category: currentCategory || 'General',
+            title: currentInspectData ? currentInspectData.title : null
           })
         });
+
         const d = await res.json();
         if (res.ok) {
-          document.getElementById('inspect-result-container').classList.add('hidden');
+          closeFolderModal();
           fetchTasks();
         } else {
           alert('Failed to start download: ' + (d.error || 'Unknown error'));
@@ -622,6 +1962,9 @@
       }
     }
 
+    // ============================================================
+    // PERSISTENT LIVE TRANSFER QUEUE
+    // ============================================================
     async function fetchTasks() {
       try {
         const res = await fetch('/api/mega/tasks');
@@ -641,55 +1984,105 @@
       container.classList.remove('hidden');
 
       taskList.innerHTML = tasks.map(t => {
-        const isRunning = t.status === 'downloading';
-        const statusClass = t.status === 'completed'
-          ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
-          : (t.status === 'failed'
-              ? 'bg-rose-500/10 text-rose-400 border-rose-500/20'
-              : (t.status === 'cancelled'
-                  ? 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20'
-                  : 'bg-cyan-500/10 text-cyan-400 border-cyan-500/20 animate-pulse'));
+        const isDownloading = t.status === 'downloading';
+        const isPaused = t.status === 'paused';
+        const isFinished = t.status === 'completed' || t.status === 'cancelled' || t.status === 'failed';
+
+        let statusClass = 'bg-cyan-500/10 text-cyan-400 border-cyan-500/25 animate-pulse';
+        let statusText = t.status ? t.status.toUpperCase() : 'QUEUED';
+
+        if (t.status === 'completed') {
+          statusClass = 'bg-emerald-500/10 text-emerald-400 border-emerald-500/25';
+        } else if (t.status === 'failed') {
+          statusClass = 'bg-rose-500/10 text-rose-400 border-rose-500/25';
+        } else if (t.status === 'paused') {
+          statusClass = 'bg-amber-500/10 text-amber-400 border-amber-500/25';
+        } else if (t.status === 'cancelled') {
+          statusClass = 'bg-zinc-500/10 text-secondary border-zinc-500/25';
+        } else if (t.status === 'cooling_down' || (t.status_message && t.status_message.includes('cooling down'))) {
+          statusClass = 'bg-amber-500/15 text-amber-300 border-amber-500/30';
+          statusText = 'COOLING DOWN (10S)';
+        }
 
         const etaText = t.eta_seconds > 0 ? `ETA: ${Math.floor(t.eta_seconds / 60)}m ${t.eta_seconds % 60}s` : (t.status === 'completed' ? 'Done' : '—');
-        const speedText = t.speed_mbps > 0 ? `${t.speed_mbps.toFixed(1)} MB/s` : '—';
-        const cancelBtn = isRunning
-          ? `<button onclick="cancelTask('${t.id}')" class="px-2.5 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 text-xs font-medium border border-rose-500/20 transition-colors">Cancel</button>`
-          : '';
+        const speedText = t.speed_mbps > 0 ? `${t.speed_mbps.toFixed(1)} MB/s` : '0.0 MB/s';
+        const categoryBadge = t.category ? `<span class="px-2 py-0.5 rounded text-xs mono bg-white/5 border border-white/10 text-secondary font-medium">${t.category}</span>` : '';
+        const workersBadge = t.active_workers > 0 ? `<span class="px-2 py-0.5 rounded text-xs mono bg-violet-500/10 text-violet-300 border border-violet-500/20">${t.active_workers} workers</span>` : '';
+        const routeBadge = t.routing_mode === 'force_proxy'
+          ? '<span class="px-2 py-0.5 rounded text-xs mono bg-sky-500/10 text-sky-400 border border-sky-500/25">Proxy Gateway</span>'
+          : '<span class="px-2 py-0.5 rounded text-xs mono bg-emerald-500/10 text-emerald-400 border border-emerald-500/25">Passive Direct</span>';
+
+        let actionButtons = '';
+        if (isDownloading) {
+          actionButtons += `<button onclick="pauseTask('${t.id}')" class="px-3 py-1.5 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 text-xs font-semibold border border-amber-500/25 transition-colors">Pause</button>`;
+          actionButtons += `<button onclick="cancelTask('${t.id}')" class="px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 text-xs font-semibold border border-rose-500/25 transition-colors">Cancel</button>`;
+        } else if (isPaused || t.status === 'failed') {
+          actionButtons += `<button onclick="resumeTask('${t.id}')" class="px-3 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-xs font-semibold border border-emerald-500/25 transition-colors">Resume</button>`;
+          actionButtons += `<button onclick="cancelTask('${t.id}')" class="px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 text-xs font-semibold border border-rose-500/25 transition-colors">Cancel</button>`;
+        }
+
+        actionButtons += `<button onclick="openFolderTask('${t.id}')" title="Open destination directory" class="px-3 py-1.5 rounded-lg bg-surface hover:bg-panel text-secondary hover:text-primary text-xs font-medium border border-stroke transition-colors flex items-center gap-1.5">
+          <svg class="w-3.5 h-3.5 text-secondary" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/></svg>
+          <span>Open</span>
+        </button>`;
+
+        if (isFinished) {
+          actionButtons += `<button onclick="deleteTask('${t.id}')" title="Remove from queue" class="px-2.5 py-1.5 rounded-lg text-secondary hover:text-rose-400 hover:bg-rose-500/10 border border-transparent hover:border-rose-500/20 transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+          </button>`;
+        }
 
         return `
-          <div class="p-3.5 rounded-xl bg-obsidian border border-stroke space-y-2.5 text-xs">
+          <div class="p-4 rounded-xl bg-panel border border-stroke space-y-3 shadow-md">
             <div class="flex items-center justify-between gap-3">
-              <div class="space-y-0.5 truncate">
-                <div class="flex items-center gap-2">
-                  <span class="font-medium text-white truncate">${t.title}</span>
-                  <span class="px-1.5 py-0.5 rounded text-[10px] mono border ${statusClass}">${t.status.toUpperCase()}</span>
+              <div class="space-y-1 truncate">
+                <div class="flex items-center gap-2.5 flex-wrap">
+                  <span class="text-[15px] font-semibold text-primary truncate">${escapeHtml(t.title)}</span>
+                  <span class="px-2 py-0.5 rounded text-xs mono border ${statusClass}">${statusText}</span>
+                  ${categoryBadge}
+                  ${routeBadge}
+                  ${workersBadge}
                 </div>
-                <p class="text-[10px] text-zinc-500 mono truncate">${t.output_path}</p>
+                <p class="text-xs text-secondary mono truncate">${escapeHtml(t.output_path)}</p>
               </div>
               <div class="flex items-center gap-2 shrink-0">
-                ${cancelBtn}
+                ${actionButtons}
               </div>
             </div>
 
-            <div class="w-full bg-white/5 rounded-full h-1.5 overflow-hidden">
+            <div class="w-full bg-white/5 rounded-full h-2 overflow-hidden">
               <div class="bg-gradient-to-r from-emerald-500 to-cyan-400 h-full rounded-full transition-all duration-300" style="width: ${t.progress_percent}%"></div>
             </div>
 
-            <div class="flex items-center justify-between text-[11px] mono text-zinc-400">
+            <div class="flex items-center justify-between text-xs mono tabular-nums text-secondary">
               <div class="flex items-center gap-2">
-                <span class="text-white font-medium">${t.progress_percent.toFixed(1)}%</span>
+                <span class="text-primary font-semibold">${t.progress_percent.toFixed(1)}%</span>
                 <span class="text-zinc-600">•</span>
                 <span>${formatBytes(t.downloaded_bytes)} / ${formatBytes(t.total_bytes)}</span>
               </div>
               <div class="flex items-center gap-2">
-                <span class="text-emerald-400 font-medium">${speedText}</span>
+                <span class="text-emerald-400 font-semibold">${speedText}</span>
                 <span class="text-zinc-600">•</span>
-                <span class="text-zinc-400">${etaText}</span>
+                <span class="text-secondary">${etaText}</span>
               </div>
             </div>
           </div>
         `;
       }).join('');
+    }
+
+    async function pauseTask(id) {
+      try {
+        await fetch(`/api/mega/tasks/${id}/pause`, { method: 'POST' });
+        fetchTasks();
+      } catch (e) {}
+    }
+
+    async function resumeTask(id) {
+      try {
+        await fetch(`/api/mega/tasks/${id}/resume`, { method: 'POST' });
+        fetchTasks();
+      } catch (e) {}
     }
 
     async function cancelTask(id) {
@@ -699,21 +2092,89 @@
       } catch (e) {}
     }
 
+    async function deleteTask(id) {
+      try {
+        await fetch(`/api/mega/tasks/${id}`, { method: 'DELETE' });
+        fetchTasks();
+      } catch (e) {}
+    }
+
+    async function openFolderTask(id) {
+      try {
+        await fetch(`/api/mega/tasks/${id}/open-folder`, { method: 'POST' });
+      } catch (e) {}
+    }
+
+    // ============================================================
+    // MANUAL PROXY IMPORT MODAL
+    // ============================================================
+    function openImportModal() {
+      document.getElementById('import-proxies-input').value = '';
+      document.getElementById('import-result').classList.add('hidden');
+      document.getElementById('import-modal').classList.remove('hidden');
+    }
+
+    function closeImportModal() {
+      document.getElementById('import-modal').classList.add('hidden');
+    }
+
+    async function submitImportProxies() {
+      const raw = document.getElementById('import-proxies-input').value.trim();
+      if (!raw) return;
+      const lines = raw.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+      if (lines.length === 0) return;
+
+      const btn = document.getElementById('btn-submit-import');
+      const resEl = document.getElementById('import-result');
+      btn.disabled = true;
+
+      try {
+        const res = await fetch('/api/proxies/import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ proxies: lines })
+        });
+        const data = await res.json();
+        resEl.classList.remove('hidden');
+        if (res.ok) {
+          resEl.className = 'text-xs mono p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-400';
+          resEl.textContent = `Successfully imported ${data.imported || 0} proxies!`;
+          fetchStatus();
+          fetchProxies();
+          setTimeout(closeImportModal, 1200);
+        } else {
+          resEl.className = 'text-xs mono p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400';
+          resEl.textContent = 'Import error: ' + (data.error || 'Server error');
+        }
+      } catch (e) {
+        resEl.classList.remove('hidden');
+        resEl.className = 'text-xs mono p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400';
+        resEl.textContent = 'Network error: ' + e.message;
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    // Enter shortcut to inspect in URL box
     document.getElementById('search-box').addEventListener('input', renderTable);
     document.getElementById('mega-url-input').addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') inspectMegaLink();
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) inspectMegaLink();
     });
 
+    // Start background sync tickers
     setInterval(fetchStatus, 1500);
     setInterval(fetchFastest, 2000);
     setInterval(fetchProxies, 3000);
     setInterval(fetchTasks, 1000);
 
+    // Initial load
     fetchStatus();
     fetchFastest();
     fetchProxies();
     fetchTasks();
     fetchDefaultDir();
+    fetchConfig();
+    fetchSettings();
   </script>
 </body>
 </html>

@@ -11,7 +11,7 @@ use reqwest::{Client, Proxy, StatusCode};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[global_allocator]
@@ -59,6 +59,10 @@ struct Args {
     /// Bypass rotating proxy gateway and download directly via host IP
     #[arg(long)]
     direct: bool,
+
+    /// Transfer routing mode: "passive" (direct ISP speed, auto-fallback to proxy on 509) or "force_proxy"
+    #[arg(long, default_value = "passive")]
+    mode: String,
 }
 
 #[derive(Debug, Clone)]
@@ -114,16 +118,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("{}", route_status);
 
-    let mega = MegaClient::new(gateway_url);
+    let mega = Arc::new(MegaClient::new(gateway_url));
 
-    // Build HTTP client for workers
-    let mut http_builder = Client::builder().timeout(CHUNK_TIMEOUT);
-    if let Some(gw) = gateway_url {
-        if let Ok(proxy) = Proxy::all(gw) {
-            http_builder = http_builder.proxy(proxy);
-        }
+    // Build HTTP clients for workers: direct connection and proxy gateway with per-read timeouts
+    let direct_http = Arc::new(
+        Client::builder()
+            .connect_timeout(Duration::from_secs(8))
+            .read_timeout(Duration::from_secs(15))
+            .timeout(CHUNK_TIMEOUT)
+            .build()?,
+    );
+    let mut proxy_builder = Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .read_timeout(Duration::from_secs(15))
+        .timeout(CHUNK_TIMEOUT);
+    if let Ok(proxy) = Proxy::all(&args.gateway) {
+        proxy_builder = proxy_builder.proxy(proxy);
     }
-    let http = Arc::new(http_builder.build()?);
+    let proxy_http = Arc::new(proxy_builder.build()?);
+
+    let force_proxy = args.mode.eq_ignore_ascii_case("force_proxy") || args.mode.eq_ignore_ascii_case("force");
+    let is_direct_only = args.direct;
+    let use_proxy = Arc::new(std::sync::atomic::AtomicBool::new(force_proxy));
+
+    if force_proxy {
+        info!("Routing mode: FORCE PROXY (routing chunks through rotating gateway from byte 0)");
+    } else if is_direct_only {
+        info!("Routing mode: DIRECT ONLY (proxy disabled)");
+    } else {
+        info!("Routing mode: PASSIVE AUTO-FALLBACK (direct ISP speed, auto-switch to proxy on 509)");
+    }
 
     if link.is_folder_scope() {
         // ============================================================
@@ -132,9 +156,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("Resolving public folder tree via MEGA API...");
         let tree = mega.fetch_folder_tree(&link).await?;
 
+        let folder_name = tree.root_title().unwrap_or_else(|| link.handle.clone());
         let base_out_dir = match args.output {
             Some(p) => p,
-            None => PathBuf::from(&link.handle),
+            None => PathBuf::from(&folder_name),
         };
 
         println!("Folder Handle : {}", tree.folder_handle);
@@ -190,7 +215,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 key: file_key,
             };
 
-            download_file_pipeline(&meta, &target_path, Arc::clone(&http), args.concurrency, &route_status).await?;
+            download_file_pipeline(
+                &meta,
+                &target_path,
+                Arc::clone(&mega),
+                Some(&link.handle),
+                Arc::clone(&direct_http),
+                Arc::clone(&proxy_http),
+                Arc::clone(&use_proxy),
+                is_direct_only,
+                args.concurrency,
+                &route_status,
+            ).await?;
         }
 
         println!("\n============================================================");
@@ -229,7 +265,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("Proxy Route : {}", route_status);
         println!("============================================================");
 
-        download_file_pipeline(&meta, &out_path, Arc::clone(&http), args.concurrency, &route_status).await?;
+        download_file_pipeline(
+            &meta,
+            &out_path,
+            Arc::clone(&mega),
+            None,
+            Arc::clone(&direct_http),
+            Arc::clone(&proxy_http),
+            Arc::clone(&use_proxy),
+            is_direct_only,
+            args.concurrency,
+            &route_status,
+        ).await?;
 
         println!("============================================================");
         println!(" File Download Complete : Verified");
@@ -243,7 +290,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn download_file_pipeline(
     meta: &FileMetadata,
     out_path: &Path,
-    http: Arc<Client>,
+    mega: Arc<MegaClient>,
+    folder_handle: Option<&str>,
+    direct_http: Arc<Client>,
+    proxy_http: Arc<Client>,
+    use_proxy: Arc<std::sync::atomic::AtomicBool>,
+    is_direct_only: bool,
     concurrency: usize,
     route_display: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -347,11 +399,21 @@ async fn download_file_pipeline(
     let mut worker_handles = Vec::with_capacity(concurrency);
     let rx = Arc::new(Mutex::new(rx));
 
+    let current_storage_url = Arc::new(tokio::sync::RwLock::new(meta.download_url.clone()));
+    let consecutive_errors = Arc::new(AtomicUsize::new(0));
+
     for _worker_id in 0..concurrency {
         let rx = Arc::clone(&rx);
         let tx = tx.clone();
-        let http = Arc::clone(&http);
-        let storage_url = meta.download_url.clone();
+        let direct_http = Arc::clone(&direct_http);
+        let proxy_http = Arc::clone(&proxy_http);
+        let use_proxy = Arc::clone(&use_proxy);
+        let current_storage_url = Arc::clone(&current_storage_url);
+        let consecutive_errors = Arc::clone(&consecutive_errors);
+        let mega = Arc::clone(&mega);
+        let folder_handle_opt = folder_handle.map(|s| s.to_string());
+        let file_handle = meta.handle.clone();
+        let file_name = meta.name.clone();
         let aes_key = meta.key.aes_key;
         let nonce = meta.key.nonce;
         let file = Arc::clone(&shared_file);
@@ -383,24 +445,39 @@ async fn download_file_pipeline(
                 active.fetch_add(1, Ordering::Relaxed);
                 let chunk = task.info;
 
+                let http = if is_direct_only {
+                    Arc::clone(&direct_http)
+                } else if use_proxy.load(Ordering::Relaxed) {
+                    Arc::clone(&proxy_http)
+                } else {
+                    Arc::clone(&direct_http)
+                };
+
                 let download_fut = async {
                     // INVARIANT 5: Storage Node Fetching
-                    let range_path_url = format!("{}/{}", storage_url, chunk.path_range());
+                    let current_url = current_storage_url.read().await.clone();
+                    let range_path_url = format!("{}/{}", current_url, chunk.path_range());
 
                     let resp_res = http.get(&range_path_url).send().await;
-                    let resp = match resp_res {
+                    let mut resp = match resp_res {
                         Ok(r) if r.status().is_success() => r,
+                        Ok(r) if r.status() == StatusCode::FORBIDDEN => {
+                            return Err(MegaError::ApiError(403));
+                        }
                         Ok(r) if r.status() == StatusCode::from_u16(509).unwrap_or(StatusCode::TOO_MANY_REQUESTS) => {
                             return Err(MegaError::OverQuota);
                         }
                         _ => {
                             let range_val = format!("bytes={}-{}", chunk.offset, chunk.end_offset() - 1);
-                            let r2 = http.get(&storage_url)
+                            let r2 = http.get(&current_url)
                                 .header("Range", range_val)
                                 .send()
                                 .await
                                 .map_err(MegaError::Http)?;
 
+                            if r2.status() == StatusCode::FORBIDDEN {
+                                return Err(MegaError::ApiError(403));
+                            }
                             if r2.status() == StatusCode::from_u16(509).unwrap_or(StatusCode::TOO_MANY_REQUESTS) {
                                 return Err(MegaError::OverQuota);
                             }
@@ -411,15 +488,42 @@ async fn download_file_pipeline(
                         }
                     };
 
-                    let body_bytes = resp.bytes().await.map_err(MegaError::Http)?;
-                    if body_bytes.len() as u64 != chunk.size {
-                        return Err(MegaError::SizeMismatch {
-                            expected: chunk.size,
-                            actual: body_bytes.len() as u64,
-                        });
+                    // Strict Per-Read Stall Timeout on Chunk Streams
+                    let mut plaintext = Vec::with_capacity(chunk.size as usize);
+                    loop {
+                        let chunk_read = tokio::time::timeout(Duration::from_secs(15), resp.chunk()).await;
+                        match chunk_read {
+                            Ok(Ok(Some(bytes))) => {
+                                if bytes.is_empty() {
+                                    drop(resp);
+                                    return Err(MegaError::Io(std::io::Error::new(
+                                        std::io::ErrorKind::TimedOut,
+                                        "Stall watchdog: read delivered 0 bytes",
+                                    )));
+                                }
+                                plaintext.extend_from_slice(&bytes);
+                            }
+                            Ok(Ok(None)) => break,
+                            Ok(Err(e)) => {
+                                drop(resp);
+                                return Err(MegaError::Http(e));
+                            }
+                            Err(_) => {
+                                drop(resp);
+                                return Err(MegaError::Io(std::io::Error::new(
+                                    std::io::ErrorKind::TimedOut,
+                                    "Stall watchdog: per-read timeout exceeded",
+                                )));
+                            }
+                        }
                     }
 
-                    let mut plaintext = body_bytes.to_vec();
+                    if plaintext.len() as u64 != chunk.size {
+                        return Err(MegaError::SizeMismatch {
+                            expected: chunk.size,
+                            actual: plaintext.len() as u64,
+                        });
+                    }
 
                     // In-place AES-128-CTR decryption
                     decrypt_ctr(&aes_key, &nonce, chunk.offset, &mut plaintext);
@@ -449,6 +553,7 @@ async fn download_file_pipeline(
 
                 match res {
                     Ok(Ok(mac)) => {
+                        consecutive_errors.store(0, Ordering::Relaxed);
                         {
                             let mut lock = macs.lock().await;
                             lock[chunk.index] = Some(mac);
@@ -465,8 +570,25 @@ async fn download_file_pipeline(
                             break;
                         }
                     }
+                    Ok(Err(MegaError::ApiError(403))) => {
+                        warn!("HTTP 403 Forbidden on file '{}'; refreshing temporary download URL...", file_name);
+                        if let Ok(new_url) = mega.refresh_file_download_url(folder_handle_opt.as_deref(), &file_handle).await {
+                            *current_storage_url.write().await = new_url;
+                            consecutive_errors.store(0, Ordering::Relaxed);
+                        }
+                        if task.attempt < MAX_CHUNK_RETRIES && !worker_cancel.is_cancelled() {
+                            let _ = tx.send(ChunkTask { info: chunk, attempt: task.attempt + 1 }).await;
+                        }
+                    }
                     Ok(Err(MegaError::OverQuota)) => {
                         debug!("Chunk {} quota limit (HTTP 509). Backing off and retrying...", chunk.index);
+                        if !is_direct_only && !use_proxy.load(Ordering::Relaxed) {
+                            info!("Direct host connection hit MEGA 509 quota. Automatically switching to rotating proxy gateway!");
+                            use_proxy.store(true, Ordering::SeqCst);
+                        }
+                        if let Ok(new_url) = mega.refresh_file_download_url(folder_handle_opt.as_deref(), &file_handle).await {
+                            *current_storage_url.write().await = new_url;
+                        }
                         tokio::time::sleep(Duration::from_millis(500 * (task.attempt + 1) as u64)).await;
 
                         if task.attempt < MAX_CHUNK_RETRIES && !worker_cancel.is_cancelled() {
@@ -477,7 +599,15 @@ async fn download_file_pipeline(
                         }
                     }
                     Ok(Err(e)) => {
-                        debug!("Chunk {} error (attempt {}): {}", chunk.index, task.attempt + 1, e);
+                        warn!("Chunk {} error on file '{}' (attempt {}): {}", chunk.index, file_name, task.attempt + 1, e);
+                        let err_count = consecutive_errors.fetch_add(1, Ordering::Relaxed) + 1;
+                        if err_count >= 3 {
+                            warn!("3 consecutive errors on file '{}'; refreshing temporary download URL...", file_name);
+                            if let Ok(new_url) = mega.refresh_file_download_url(folder_handle_opt.as_deref(), &file_handle).await {
+                                *current_storage_url.write().await = new_url;
+                                consecutive_errors.store(0, Ordering::Relaxed);
+                            }
+                        }
                         if task.attempt < MAX_CHUNK_RETRIES && !worker_cancel.is_cancelled() {
                             tokio::time::sleep(Duration::from_millis(250 * (task.attempt + 1) as u64)).await;
                             let _ = tx.send(ChunkTask { info: chunk, attempt: task.attempt + 1 }).await;
@@ -487,7 +617,15 @@ async fn download_file_pipeline(
                         }
                     }
                     Err(_) => {
-                        debug!("Chunk {} timed out (> {:?}) on attempt {}", chunk.index, CHUNK_TIMEOUT, task.attempt + 1);
+                        warn!("Chunk stall timeout on file '{}', chunk #{}: dropping stalled stream", file_name, chunk.index);
+                        let err_count = consecutive_errors.fetch_add(1, Ordering::Relaxed) + 1;
+                        if err_count >= 3 {
+                            warn!("3 consecutive timeouts on file '{}'; refreshing temporary download URL...", file_name);
+                            if let Ok(new_url) = mega.refresh_file_download_url(folder_handle_opt.as_deref(), &file_handle).await {
+                                *current_storage_url.write().await = new_url;
+                                consecutive_errors.store(0, Ordering::Relaxed);
+                            }
+                        }
                         if task.attempt < MAX_CHUNK_RETRIES && !worker_cancel.is_cancelled() {
                             let _ = tx.send(ChunkTask { info: chunk, attempt: task.attempt + 1 }).await;
                         } else if !worker_cancel.is_cancelled() {
