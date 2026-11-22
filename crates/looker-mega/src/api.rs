@@ -103,7 +103,7 @@ impl MegaClient {
             .connect_timeout(Duration::from_secs(8))
             .read_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(20))
-            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Looker/0.1.0")
+            .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Looker/0.1.1")
             .build()
             .expect("Failed to build direct HTTPS client");
 
@@ -114,7 +114,7 @@ impl MegaClient {
                     .connect_timeout(Duration::from_secs(8))
                     .read_timeout(Duration::from_secs(15))
                     .timeout(Duration::from_secs(25))
-                    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Looker/0.1.0")
+                    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) Looker/0.1.1")
                     .proxy(p)
                     .build()
                     .ok()

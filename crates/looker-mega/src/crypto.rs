@@ -1,5 +1,5 @@
 use aes::Aes128;
-use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
 use base64::Engine;
 use cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
 use cipher::generic_array::GenericArray;
@@ -16,13 +16,37 @@ pub fn base64url_decode(input: &str) -> Result<Vec<u8>, MegaError> {
         return Ok(bytes);
     }
 
-    // Attempt padding
-    let mut padded = clean.to_string();
-    while padded.len() % 4 != 0 {
-        padded.push('=');
+    // Normalize to standard base64 and pad to multiple of 4
+    let mut normalized = clean.replace('-', "+").replace('_', "/");
+    let rem = normalized.len() % 4;
+    if rem != 0 {
+        normalized.push_str(&"===="[rem..]);
     }
-    let bytes = URL_SAFE.decode(&padded)?;
+
+    if let Ok(bytes) = STANDARD.decode(&normalized) {
+        return Ok(bytes);
+    }
+    if let Ok(bytes) = STANDARD_NO_PAD.decode(clean) {
+        return Ok(bytes);
+    }
+
+    let bytes = STANDARD.decode(&normalized)?;
     Ok(bytes)
+}
+
+/// Sanitizes filename characters that are forbidden by common operating systems (< > : " / \ | ? *).
+pub fn sanitize_filename(name: &str) -> String {
+    let forbidden = ['<', '>', ':', '"', '/', '\\', '|', '?', '*'];
+    let sanitized: String = name
+        .chars()
+        .map(|c| if forbidden.contains(&c) || c.is_ascii_control() { '_' } else { c })
+        .collect();
+    let trimmed = sanitized.trim();
+    if trimmed.is_empty() {
+        "unnamed".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -86,11 +110,9 @@ pub fn decrypt_attributes(
     aes_key: &[u8; 16],
     encrypted_b64: &str,
 ) -> Result<MegaFileAttributes, MegaError> {
-    let mut ciphertext = base64url_decode(encrypted_b64)?;
-    if ciphertext.len() % 16 != 0 {
-        // Pad ciphertext with trailing zeros if not a multiple of 16
-        let rem = 16 - (ciphertext.len() % 16);
-        ciphertext.extend(vec![0u8; rem]);
+    let ciphertext = base64url_decode(encrypted_b64)?;
+    if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
+        return Err(MegaError::InvalidKeyLength(ciphertext.len()));
     }
 
     let cipher = Aes128::new(GenericArray::from_slice(aes_key));
@@ -116,15 +138,25 @@ pub fn decrypt_attributes(
     }
 
     let json_bytes = &plaintext[4..];
-    // Find terminating null byte if present
-    let end = json_bytes.iter().position(|&b| b == 0).unwrap_or(json_bytes.len());
+    // Find the final '}' of the JSON object to exclude any trailing 0x00 or padding bytes
+    let end = if let Some(last_brace_pos) = json_bytes.iter().rposition(|&b| b == b'}') {
+        last_brace_pos + 1
+    } else {
+        let mut len = json_bytes.len();
+        while len > 0 && json_bytes[len - 1] == 0 {
+            len -= 1;
+        }
+        len
+    };
+
     let json_str = std::str::from_utf8(&json_bytes[..end])
         .map_err(|e| MegaError::AttributeJson(serde_json::Error::io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             e,
         ))))?;
 
-    let attrs: MegaFileAttributes = serde_json::from_str(json_str)?;
+    let mut attrs: MegaFileAttributes = serde_json::from_str(json_str)?;
+    attrs.name = sanitize_filename(&attrs.name);
     Ok(attrs)
 }
 

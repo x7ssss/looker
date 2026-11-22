@@ -209,7 +209,7 @@ pub fn resolve_unique_path(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChunkStatus {
     Pending,
-    InFlight { worker_id: usize, attempt: usize },
+    InFlight { active_workers: HashSet<usize>, attempt: usize },
     Completed,
     Failed,
 }
@@ -248,35 +248,84 @@ impl ChunkScheduler {
     pub fn acquire_next_chunk(&mut self, worker_id: usize) -> Option<(ChunkInfo, usize)> {
         for (idx, status) in self.statuses.iter_mut().enumerate() {
             if *status == ChunkStatus::Pending {
-                *status = ChunkStatus::InFlight { worker_id, attempt: 0 };
+                let mut active = HashSet::new();
+                active.insert(worker_id);
+                *status = ChunkStatus::InFlight { active_workers: active, attempt: 0 };
                 return Some((self.chunks[idx], 0));
             }
         }
         None
     }
 
+    /// When fewer than max_workers chunks remain at the end of a file, allow speculative tail retries
+    /// on uncompleted in-flight chunks so one slow proxy cannot hold up file completion.
+    pub fn acquire_speculative_tail_chunk(&mut self, worker_id: usize, max_workers: usize) -> Option<(ChunkInfo, usize)> {
+        let remaining = self.chunks.len().saturating_sub(self.completed_count);
+        if remaining == 0 || remaining >= max_workers {
+            return None;
+        }
+
+        for (idx, status) in self.statuses.iter_mut().enumerate() {
+            if let ChunkStatus::InFlight { active_workers, attempt } = status {
+                if !active_workers.contains(&worker_id) && active_workers.len() < 2 {
+                    active_workers.insert(worker_id);
+                    *attempt += 1;
+                    return Some((self.chunks[idx], *attempt));
+                }
+            }
+        }
+        None
+    }
+
+    /// Checks if a chunk is completed.
+    pub fn is_completed(&self, index: usize) -> bool {
+        if index < self.statuses.len() {
+            self.statuses[index] == ChunkStatus::Completed
+        } else {
+            false
+        }
+    }
+
     /// Marks a chunk completed and increments the completion count.
-    pub fn mark_completed(&mut self, index: usize) {
+    /// Returns true if newly transitioned to Completed, false if already Completed.
+    pub fn mark_completed(&mut self, index: usize) -> bool {
         if index < self.statuses.len() {
             if self.statuses[index] != ChunkStatus::Completed {
                 self.statuses[index] = ChunkStatus::Completed;
                 self.completed_count += 1;
+                return true;
             }
         }
+        false
     }
 
     /// Marks a chunk for retry or marks it failed if max retries exceeded.
     pub fn mark_retry(&mut self, index: usize, max_retries: usize) -> Result<usize, ()> {
+        self.mark_worker_retry(index, None, max_retries)
+    }
+
+    /// Marks a chunk for retry by a specific worker, preserving other in-flight workers.
+    pub fn mark_worker_retry(&mut self, index: usize, worker_id: Option<usize>, max_retries: usize) -> Result<usize, ()> {
         if index < self.statuses.len() {
-            let attempt = match self.statuses[index] {
-                ChunkStatus::InFlight { attempt, .. } => attempt + 1,
-                _ => 1,
-            };
-            if attempt < max_retries {
-                self.statuses[index] = ChunkStatus::Pending;
-                Ok(attempt)
+            if self.statuses[index] == ChunkStatus::Completed {
+                return Ok(0);
+            }
+            if let ChunkStatus::InFlight { active_workers, attempt } = &mut self.statuses[index] {
+                if let Some(w) = worker_id {
+                    active_workers.remove(&w);
+                    if !active_workers.is_empty() {
+                        return Ok(*attempt);
+                    }
+                }
+                let next_attempt = *attempt + 1;
+                if next_attempt < max_retries {
+                    self.statuses[index] = ChunkStatus::Pending;
+                    Ok(next_attempt)
+                } else {
+                    self.statuses[index] = ChunkStatus::Failed;
+                    Err(())
+                }
             } else {
-                self.statuses[index] = ChunkStatus::Failed;
                 Err(())
             }
         } else {
@@ -1851,6 +1900,12 @@ pub async fn download_single_file(
                                 AcquireAction::Done
                             } else if let Some((c, att)) = sched.acquire_next_chunk(worker_id) {
                                 AcquireAction::Found(c, att)
+                            } else if let Some((c, att)) = sched.acquire_speculative_tail_chunk(worker_id, concurrency) {
+                                info!(
+                                    "Worker #{} acquired speculative tail retry for chunk #{} of '{}'",
+                                    worker_id, c.index, file_name_str
+                                );
+                                AcquireAction::Found(c, att)
                             } else if sched.active_in_flight() == 0 {
                                 AcquireAction::Done
                             } else {
@@ -1940,7 +1995,6 @@ pub async fn download_single_file(
                         chunk.index, chunk.size, chunk.offset, file_name_str, proxy_addr
                     );
 
-                    let watchdog_timeout = Duration::from_secs(s.stall_watchdog_seconds);
                     let current_url = current_storage_url.read().await.clone();
                     let last_bytes_time_ref = Arc::clone(&last_bytes_time);
 
@@ -1982,10 +2036,11 @@ pub async fn download_single_file(
                             }
                         };
 
-                        // Strict Per-Read Stall Timeout on Chunk Streams
+                        // Strict Per-Read Stall Timeout on Chunk Streams (abort immediately after 6s of no progress)
+                        const PER_READ_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(6);
                         let mut plaintext = Vec::with_capacity(chunk.size as usize);
                         loop {
-                            let chunk_read = tokio::time::timeout(watchdog_timeout, resp.chunk()).await;
+                            let chunk_read = tokio::time::timeout(PER_READ_NO_PROGRESS_TIMEOUT, resp.chunk()).await;
                             match chunk_read {
                                 Ok(Ok(Some(bytes))) => {
                                     if bytes.is_empty() {
@@ -2007,7 +2062,7 @@ pub async fn download_single_file(
                                     drop(resp);
                                     return Err(MegaError::Io(std::io::Error::new(
                                         std::io::ErrorKind::TimedOut,
-                                        "Stall watchdog: per-read timeout exceeded",
+                                        "Stall watchdog: per-read no-progress timeout exceeded (no bytes for 6s)",
                                     )));
                                 }
                             }
@@ -2048,21 +2103,33 @@ pub async fn download_single_file(
 
                     match res {
                         Ok(Ok(())) => {
-                            {
-                                scheduler.lock().mark_completed(chunk.index);
-                            }
+                            let is_newly_completed = {
+                                scheduler.lock().mark_completed(chunk.index)
+                            };
                             chunk_notify.notify_waiters();
                             if s.reset_proxy_per_chunk {
                                 cached_client = None;
                             }
-                            let _ = result_tx.send(ChunkResult::Success {
-                                index: chunk.index,
-                                size: chunk.size,
-                                proxy: proxy_addr,
-                            }).await;
+                            if is_newly_completed {
+                                let _ = result_tx.send(ChunkResult::Success {
+                                    index: chunk.index,
+                                    size: chunk.size,
+                                    proxy: proxy_addr,
+                                }).await;
+                            } else {
+                                info!(
+                                    "Chunk #{} of '{}' was already completed by a racing worker; ignoring duplicate completion",
+                                    chunk.index, file_name_str
+                                );
+                            }
                         }
                         Ok(Err(MegaError::ApiError(code))) if code == 403 || code == 410 => {
                             cached_client = None;
+                            if scheduler.lock().is_completed(chunk.index) {
+                                info!("Chunk #{} had API error {} after being completed by another worker; ignoring", chunk.index, code);
+                                chunk_notify.notify_waiters();
+                                continue;
+                            }
                             warn!("HTTP {} on file '{}'; refreshing temporary download URL...", code, file_name_str);
                             let _ = refresh_storage_url_debounced(
                                 &current_storage_url,
@@ -2073,7 +2140,7 @@ pub async fn download_single_file(
                                 &current_url,
                             ).await;
 
-                            let retry_result = { scheduler.lock().mark_retry(chunk.index, MAX_CHUNK_RETRIES) };
+                            let retry_result = { scheduler.lock().mark_worker_retry(chunk.index, Some(worker_id), MAX_CHUNK_RETRIES) };
                             match retry_result {
                                 Ok(_) => {
                                     chunk_notify.notify_waiters();
@@ -2088,6 +2155,11 @@ pub async fn download_single_file(
                         }
                         Ok(Err(MegaError::OverQuota)) => {
                             cached_client = None;
+                            if scheduler.lock().is_completed(chunk.index) {
+                                info!("Chunk #{} hit 509 after being completed by another worker; ignoring", chunk.index);
+                                chunk_notify.notify_waiters();
+                                continue;
+                            }
                             if let Some(candidate) = proxy_candidate {
                                 info!("Proxy {} hit MEGA 509 quota; marking on cooldown", candidate.addr);
                                 candidate.mark_mega_509_cooldown(Duration::from_secs(s.sticky_509_seconds.max(3600)));
@@ -2121,7 +2193,7 @@ pub async fn download_single_file(
 
                             tokio::time::sleep(Duration::from_millis(500 * (attempt + 1) as u64)).await;
 
-                            let retry_result = { scheduler.lock().mark_retry(chunk.index, MAX_CHUNK_RETRIES) };
+                            let retry_result = { scheduler.lock().mark_worker_retry(chunk.index, Some(worker_id), MAX_CHUNK_RETRIES) };
                             match retry_result {
                                 Ok(_) => {
                                     chunk_notify.notify_waiters();
@@ -2137,17 +2209,21 @@ pub async fn download_single_file(
                         }
                         Ok(Err(e)) => {
                             cached_client = None;
+                            if let Some(candidate) = proxy_candidate {
+                                pool.record_failure_at_all_levels(candidate.addr, Duration::from_secs(s.proxy_ban_seconds.max(60)));
+                            }
+                            if scheduler.lock().is_completed(chunk.index) {
+                                info!("Chunk #{} had error ({}) after being completed by another worker; ignoring", chunk.index, e);
+                                chunk_notify.notify_waiters();
+                                continue;
+                            }
                             warn!(
                                 "Chunk stall/error on file '{}', chunk #{}, offset {}: dropping proxy stream {} ({})",
                                 file_name_str, chunk.index, chunk.offset, proxy_addr, e
                             );
-                            if let Some(candidate) = proxy_candidate {
-                                pool.record_failure_at_all_levels(candidate.addr, Duration::from_secs(s.proxy_ban_seconds.max(60)));
-                            }
-                            // Under proxy network errors / TLS drops / timeouts, the MEGA storage URL is STILL valid!
                             tokio::time::sleep(Duration::from_millis(250 * (attempt + 1) as u64)).await;
 
-                            let retry_result = { scheduler.lock().mark_retry(chunk.index, MAX_CHUNK_RETRIES) };
+                            let retry_result = { scheduler.lock().mark_worker_retry(chunk.index, Some(worker_id), MAX_CHUNK_RETRIES) };
                             match retry_result {
                                 Ok(_) => {
                                     chunk_notify.notify_waiters();
@@ -2162,15 +2238,20 @@ pub async fn download_single_file(
                         }
                         Err(_) => {
                             cached_client = None;
+                            if let Some(candidate) = proxy_candidate {
+                                pool.record_failure_at_all_levels(candidate.addr, Duration::from_secs(s.proxy_ban_seconds.max(60)));
+                            }
+                            if scheduler.lock().is_completed(chunk.index) {
+                                info!("Chunk #{} timed out after being completed by another worker; ignoring", chunk.index);
+                                chunk_notify.notify_waiters();
+                                continue;
+                            }
                             warn!(
                                 "Chunk stall timeout on file '{}', chunk #{}, offset {}: dropping stalled proxy stream {}",
                                 file_name_str, chunk.index, chunk.offset, proxy_addr
                             );
-                            if let Some(candidate) = proxy_candidate {
-                                pool.record_failure_at_all_levels(candidate.addr, Duration::from_secs(s.proxy_ban_seconds.max(60)));
-                            }
 
-                            let retry_result = { scheduler.lock().mark_retry(chunk.index, MAX_CHUNK_RETRIES) };
+                            let retry_result = { scheduler.lock().mark_worker_retry(chunk.index, Some(worker_id), MAX_CHUNK_RETRIES) };
                             match retry_result {
                                 Ok(_) => {
                                     chunk_notify.notify_waiters();
@@ -2438,5 +2519,48 @@ mod tests {
         // Clean up
         remove_resume_state(&partial_path);
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_speculative_tail_retries_when_few_chunks_remain() {
+        let chunks: Vec<ChunkInfo> = (0..5)
+            .map(|i| ChunkInfo {
+                index: i,
+                offset: (i * 1024) as u64,
+                size: 1024,
+            })
+            .collect();
+
+        // Chunks 0, 1, 2 already completed
+        let mut completed_set = HashSet::new();
+        completed_set.insert(0);
+        completed_set.insert(1);
+        completed_set.insert(2);
+
+        let mut scheduler = ChunkScheduler::new(chunks, 5 * 1024, &completed_set);
+        assert_eq!(scheduler.completed_count(), 3);
+
+        // Worker 0 acquires chunk 3, Worker 1 acquires chunk 4
+        let (c3, _) = scheduler.acquire_next_chunk(0).unwrap();
+        assert_eq!(c3.index, 3);
+        let (c4, _) = scheduler.acquire_next_chunk(1).unwrap();
+        assert_eq!(c4.index, 4);
+
+        // No more pending chunks
+        assert!(scheduler.acquire_next_chunk(2).is_none());
+
+        // Max workers = 4. Remaining uncompleted chunks = 2 < 4 -> tail phase!
+        // Worker 2 should speculatively acquire chunk 3
+        let (spec_chunk, attempt) = scheduler.acquire_speculative_tail_chunk(2, 4).unwrap();
+        assert_eq!(spec_chunk.index, 3);
+        assert_eq!(attempt, 1);
+
+        // Worker 2 finishes chunk 3 first
+        assert!(scheduler.mark_completed(3));
+        assert_eq!(scheduler.completed_count(), 4);
+
+        // Worker 0 later finishes chunk 3 -> duplicate ignored
+        assert!(!scheduler.mark_completed(3));
+        assert_eq!(scheduler.completed_count(), 4);
     }
 }

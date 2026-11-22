@@ -321,3 +321,74 @@ fn test_folder_tree_subfolder_and_file_scoping() {
     assert_eq!(scoped_doc.relative_path.to_str().unwrap().replace('\\', "/"), "doc.txt");
     assert!(tree_scoped.find_node("f2").is_none()); // root.png excluded
 }
+
+#[test]
+fn test_folder_node_key_and_attribute_decryption_real_scenario() {
+    let folder_handle = "rootFolder123";
+    let folder_share_key = [0x5au8; 16];
+    let cipher = Aes128::new(GenericArray::from_slice(&folder_share_key));
+
+    // Real file key (32 bytes)
+    let file_key: [u8; 32] = [
+        0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+        0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f,
+        0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+        0xb0, 0xb1, 0xb2, 0xb3, 0xb4, 0xb5, 0xb6, 0xb7,
+    ];
+
+    // Folded AES key: file_key[i] ^ file_key[i + 16]
+    let mut expected_folded_key = [0u8; 16];
+    for i in 0..16 {
+        expected_folded_key[i] = file_key[i] ^ file_key[i + 16];
+    }
+
+    // Encrypt filename attribute "Archer - S01E01.mkv" using expected_folded_key
+    let enc_attr_b64 = mock_encrypt_attributes(&expected_folded_key, "Archer - S01E01.mkv");
+
+    // Encrypt file_key with folder_share_key using AES-128-ECB
+    let mut b1 = GenericArray::clone_from_slice(&file_key[0..16]);
+    let mut b2 = GenericArray::clone_from_slice(&file_key[16..32]);
+    cipher.encrypt_block(&mut b1);
+    cipher.encrypt_block(&mut b2);
+    let mut enc_k_bytes = Vec::new();
+    enc_k_bytes.extend_from_slice(b1.as_slice());
+    enc_k_bytes.extend_from_slice(b2.as_slice());
+    let enc_k_b64 = BASE64_URL_SAFE_NO_PAD.encode(&enc_k_bytes);
+
+    // Form k with multiple entries, prioritizing or including folder_handle
+    // e.g. "otherHandle:invalidKey,rootFolder123:<b64_key>"
+    let k_field = format!("dummyHandle:invalidKey,rootFolder123:{}", enc_k_b64);
+
+    let raw_node = RawFolderNode {
+        h: "vu42GB7a".to_string(), // 8-char handle
+        p: folder_handle.to_string(),
+        t: 0, // file
+        a: enc_attr_b64,
+        k: k_field,
+        s: Some(104857600), // 100 MB
+    };
+
+    let tree = parse_folder_tree(folder_handle, &folder_share_key, vec![raw_node])
+        .expect("Should parse and decrypt folder tree");
+
+    let file_node = tree.find_node("vu42GB7a").expect("Node vu42GB7a must be in tree");
+    // Verify expected filename instead of raw 8-character handle
+    assert_eq!(file_node.name, "Archer - S01E01.mkv");
+    assert_ne!(file_node.name, "vu42GB7a");
+    assert_eq!(file_node.size, 104857600);
+
+    // Verify 16-byte derived key and nonce
+    let key = file_node.key.as_ref().expect("File node must have derived MegaKey");
+    assert_eq!(key.aes_key, expected_folded_key);
+    assert_eq!(key.nonce, [0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7]);
+}
+
+#[test]
+fn test_base64url_decode_unpadded_with_special_chars() {
+    use looker_mega::crypto::base64url_decode;
+
+    // Test URL-safe characters '-' and '_' without padding
+    let encoded = "-__-"; // uses - and _ without = padding
+    let decoded = base64url_decode(encoded).expect("Should decode unpadded URL-safe base64");
+    assert_eq!(decoded.len(), 3);
+}

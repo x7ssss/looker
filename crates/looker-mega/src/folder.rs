@@ -6,7 +6,7 @@ use cipher::generic_array::GenericArray;
 use cipher::{BlockDecrypt, KeyInit};
 use serde::{Deserialize, Serialize};
 
-use crate::crypto::{base64url_decode, decrypt_attributes, MegaKey};
+use crate::crypto::{base64url_decode, decrypt_attributes, sanitize_filename, MegaKey};
 use crate::error::MegaError;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -176,67 +176,94 @@ pub fn parse_folder_share_key(b64: &str) -> Result<[u8; 16], MegaError> {
     Ok(key)
 }
 
-/// Unwraps node key using the 16-byte folder share key via AES-128-ECB.
+/// Extracts ordered candidate b64_keys from a node's "k" string.
+/// Splits by ',' into "<share_handle>:<b64_key>" entries.
+/// Prioritizes the entry matching `folder_id` (if provided).
+pub fn extract_key_candidates<'a>(k_param: &'a str, folder_id: Option<&str>) -> Vec<(&'a str, &'a str)> {
+    let mut prioritized = Vec::new();
+    let mut others = Vec::new();
+
+    for entry in k_param.split(',') {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let (share_h, b64_key) = if let Some(colon_idx) = trimmed.find(':') {
+            let sh = trimmed[..colon_idx].trim();
+            let after = trimmed[colon_idx + 1..].trim();
+            let key = after.split('/').next().unwrap_or(after).trim();
+            (sh, key)
+        } else {
+            let key = trimmed.split('/').next().unwrap_or(trimmed).trim();
+            ("", key)
+        };
+
+        if !b64_key.is_empty() {
+            if let Some(fid) = folder_id {
+                if !share_h.is_empty() && share_h == fid {
+                    prioritized.push((share_h, b64_key));
+                    continue;
+                }
+            }
+            others.push((share_h, b64_key));
+        }
+    }
+
+    prioritized.extend(others);
+    prioritized
+}
+
+/// Decrypts a single Base64URL-encoded node key using the 16-byte folder share key via AES-128-ECB.
 ///
 /// For folders (`t = 1`): decrypts 16 bytes of attribute key.
-/// For files (`t = 0`): decrypts 32 bytes `[k0..k7]` and folds into 16-byte AES key, 8-byte nonce, and MAC words.
-pub fn unwrap_node_key(
-    k_param: &str,
+/// For files (`t = 0`): decrypts 32 bytes `[k0..k7]` and derives the 16-byte AES key by XOR-folding
+/// `decrypted[i] ^ decrypted[i + 16]`, 8-byte IV/nonce from `decrypted[16..24]`, and 8-byte meta MAC from `decrypted[24..32]`.
+pub fn decrypt_node_key_bytes(
+    b64_key: &str,
     folder_share_key: &[u8; 16],
     node_type: FolderNodeType,
 ) -> Result<(Option<MegaKey>, Option<[u8; 16]>), MegaError> {
-    // k_param is typically "<handle>:<enc_key>" or multiple separated by "/"
-    let enc_key_str = if let Some(idx) = k_param.find(':') {
-        let after = &k_param[idx + 1..];
-        after.split('/').next().unwrap_or(after).trim()
-    } else {
-        k_param.trim()
-    };
+    let raw_bytes = base64url_decode(b64_key)?;
+    if raw_bytes.len() < 16 || raw_bytes.len() % 16 != 0 {
+        return Err(MegaError::InvalidKeyLength(raw_bytes.len()));
+    }
 
-    let raw_bytes = base64url_decode(enc_key_str)?;
     let cipher = Aes128::new(GenericArray::from_slice(folder_share_key));
+    let mut dec = raw_bytes;
+    for chunk in dec.chunks_exact_mut(16) {
+        cipher.decrypt_block(GenericArray::from_mut_slice(chunk));
+    }
 
     match node_type {
         FolderNodeType::Folder => {
-            if raw_bytes.len() < 16 {
-                return Err(MegaError::InvalidKeyLength(raw_bytes.len()));
+            if dec.len() < 16 {
+                return Err(MegaError::InvalidKeyLength(dec.len()));
             }
-            let mut block = GenericArray::clone_from_slice(&raw_bytes[0..16]);
-            cipher.decrypt_block(&mut block);
-            let attr_key: [u8; 16] = block.into();
+            let mut attr_key = [0u8; 16];
+            attr_key.copy_from_slice(&dec[0..16]);
             Ok((None, Some(attr_key)))
         }
         FolderNodeType::File => {
-            if raw_bytes.len() < 32 {
-                return Err(MegaError::InvalidKeyLength(raw_bytes.len()));
+            if dec.len() < 32 {
+                return Err(MegaError::InvalidKeyLength(dec.len()));
             }
-            let mut block0 = GenericArray::clone_from_slice(&raw_bytes[0..16]);
-            let mut block1 = GenericArray::clone_from_slice(&raw_bytes[16..32]);
-            cipher.decrypt_block(&mut block0);
-            cipher.decrypt_block(&mut block1);
+            // Derive the 16-byte file/attribute key by XOR-folding:
+            // node_key[i] = decrypted[i] ^ decrypted[i + 16] for i in 0..16
+            let mut aes_key = [0u8; 16];
+            for i in 0..16 {
+                aes_key[i] = dec[i] ^ dec[i + 16];
+            }
 
-            let mut dec_32 = [0u8; 32];
-            dec_32[0..16].copy_from_slice(&block0);
-            dec_32[16..32].copy_from_slice(&block1);
+            // Extract the 8-byte file AES-CTR IV/nonce from decrypted[16..24]
+            let mut nonce = [0u8; 8];
+            nonce.copy_from_slice(&dec[16..24]);
 
+            // Extract 8-byte meta MAC from decrypted[24..32]
             let mut words = [0u32; 8];
             for i in 0..8 {
-                words[i] = u32::from_be_bytes(dec_32[i * 4..i * 4 + 4].try_into().unwrap());
+                words[i] = u32::from_be_bytes(dec[i * 4..i * 4 + 4].try_into().unwrap());
             }
-
-            // AES Key: [k0^k4, k1^k5, k2^k6, k3^k7]
-            let mut aes_key = [0u8; 16];
-            for i in 0..4 {
-                let kw = words[i] ^ words[i + 4];
-                aes_key[i * 4..i * 4 + 4].copy_from_slice(&kw.to_be_bytes());
-            }
-
-            // Nonce: [k4, k5]
-            let mut nonce = [0u8; 8];
-            nonce[0..4].copy_from_slice(&words[4].to_be_bytes());
-            nonce[4..8].copy_from_slice(&words[5].to_be_bytes());
-
-            // Expected MAC: [k6, k7]
             let expected_mac = [words[6], words[7]];
 
             Ok((
@@ -250,6 +277,38 @@ pub fn unwrap_node_key(
             ))
         }
     }
+}
+
+/// Unwraps node key using the 16-byte folder share key via AES-128-ECB.
+///
+/// For folders (`t = 1`): decrypts 16 bytes of attribute key.
+/// For files (`t = 0`): decrypts 32 bytes `[k0..k7]` and folds into 16-byte AES key, 8-byte nonce, and MAC words.
+pub fn unwrap_node_key(
+    k_param: &str,
+    folder_share_key: &[u8; 16],
+    node_type: FolderNodeType,
+) -> Result<(Option<MegaKey>, Option<[u8; 16]>), MegaError> {
+    unwrap_node_key_prioritized(k_param, folder_share_key, None, node_type)
+}
+
+/// Unwraps node key with prioritized `folder_id` entry matching.
+pub fn unwrap_node_key_prioritized(
+    k_param: &str,
+    folder_share_key: &[u8; 16],
+    folder_id: Option<&str>,
+    node_type: FolderNodeType,
+) -> Result<(Option<MegaKey>, Option<[u8; 16]>), MegaError> {
+    let candidates = extract_key_candidates(k_param, folder_id);
+    let mut last_err = MegaError::InvalidKeyLength(0);
+
+    for (_share_h, b64_key) in candidates {
+        match decrypt_node_key_bytes(b64_key, folder_share_key, node_type) {
+            Ok(res) => return Ok(res),
+            Err(e) => last_err = e,
+        }
+    }
+
+    Err(last_err)
 }
 
 /// Raw node structure deserialized from the MEGA API response `f` array.
@@ -279,38 +338,75 @@ pub fn parse_folder_tree(
             FolderNodeType::File
         };
 
-        let (key_opt, attr_key_opt) = match unwrap_node_key(&raw.k, folder_share_key, node_type) {
-            Ok(k) => k,
-            Err(_) => {
-                // If this is a folder node (especially the root node whose handle matches folder_handle
-                // or whose parent is empty), its attributes might be encrypted directly with folder_share_key
-                if node_type == FolderNodeType::Folder {
-                    if let Ok(_) = decrypt_attributes(folder_share_key, &raw.a) {
-                        (None, Some(*folder_share_key))
-                    } else {
-                        continue;
+        let candidates = extract_key_candidates(&raw.k, Some(folder_handle));
+        let mut key_opt = None;
+        let mut attr_key_opt = None;
+        let mut decrypted_name = None;
+        let mut last_error = None;
+
+        for (_share_h, b64_key) in candidates {
+            match decrypt_node_key_bytes(b64_key, folder_share_key, node_type) {
+                Ok((k_opt, ak_opt)) => {
+                    match node_type {
+                        FolderNodeType::Folder => {
+                            if let Some(ref ak) = ak_opt {
+                                match decrypt_attributes(ak, &raw.a) {
+                                    Ok(attrs) => {
+                                        attr_key_opt = ak_opt;
+                                        decrypted_name = Some(attrs.name);
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        last_error = Some(e);
+                                    }
+                                }
+                            }
+                        }
+                        FolderNodeType::File => {
+                            if let Some(ref fk) = k_opt {
+                                match decrypt_attributes(&fk.aes_key, &raw.a) {
+                                    Ok(attrs) => {
+                                        key_opt = k_opt;
+                                        decrypted_name = Some(attrs.name);
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        last_error = Some(e);
+                                    }
+                                }
+                            }
+                        }
                     }
-                } else {
-                    continue; // Skip un-decryptable root or auxiliary nodes
+                }
+                Err(e) => {
+                    last_error = Some(e);
                 }
             }
-        };
+        }
 
-        let name = match node_type {
-            FolderNodeType::Folder => {
-                let decrypted = attr_key_opt
-                    .as_ref()
-                    .and_then(|ak| decrypt_attributes(ak, &raw.a).ok())
-                    .or_else(|| decrypt_attributes(folder_share_key, &raw.a).ok())
-                    .map(|attrs| attrs.name);
-                decrypted.unwrap_or_else(|| raw.h.clone())
+        // If none matched or validation failed, try direct folder_share_key for folder nodes
+        if decrypted_name.is_none() && node_type == FolderNodeType::Folder {
+            if let Ok(attrs) = decrypt_attributes(folder_share_key, &raw.a) {
+                attr_key_opt = Some(*folder_share_key);
+                decrypted_name = Some(attrs.name);
             }
-            FolderNodeType::File => {
-                let decrypted = key_opt
-                    .as_ref()
-                    .and_then(|fk| decrypt_attributes(&fk.aes_key, &raw.a).ok())
-                    .map(|attrs| attrs.name);
-                decrypted.unwrap_or_else(|| raw.h.clone())
+        }
+
+        let name = match decrypted_name {
+            Some(n) => sanitize_filename(&n),
+            None => {
+                if let Some(ref err) = last_error {
+                    tracing::warn!(
+                        "Failed to decrypt attributes for node {} (handle={}, type={:?}): {}",
+                        raw.h, raw.h, node_type, err
+                    );
+                } else {
+                    tracing::warn!(
+                        "Failed to decrypt attributes for node {} (handle={}, type={:?}): no valid key candidate in k={:?}",
+                        raw.h, raw.h, node_type, raw.k
+                    );
+                }
+                raw.h.clone()
             }
         };
 
