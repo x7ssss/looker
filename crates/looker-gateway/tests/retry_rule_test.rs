@@ -107,6 +107,7 @@ async fn test_pre_commit_retry_rule_success() {
         exit_ip: Some(bad_addr.ip()),
         anonymity: AnonymityLevel::Elite,
         geo: None,
+        throughput_bps: 0,
     });
     pool.add_or_update(CheckedProxy {
         addr: good_addr,
@@ -115,6 +116,7 @@ async fn test_pre_commit_retry_rule_success() {
         exit_ip: Some(good_addr.ip()),
         anonymity: AnonymityLevel::Elite,
         geo: None,
+        throughput_bps: 0,
     });
 
     // 3. Start gateway on ephemeral port
@@ -177,6 +179,7 @@ async fn test_gateway_live_and_status_endpoints() {
         exit_ip: Some(proxy_addr.ip()),
         anonymity: AnonymityLevel::Elite,
         geo: None,
+        throughput_bps: 0,
     });
     let http_addr: SocketAddr = "192.0.2.2:8080".parse().unwrap();
     pool.add_or_update(CheckedProxy {
@@ -186,6 +189,7 @@ async fn test_gateway_live_and_status_endpoints() {
         exit_ip: Some(http_addr.ip()),
         anonymity: AnonymityLevel::Elite,
         geo: None,
+        throughput_bps: 0,
     });
     let s4_addr: SocketAddr = "192.0.2.3:1080".parse().unwrap();
     pool.add_or_update(CheckedProxy {
@@ -195,6 +199,7 @@ async fn test_gateway_live_and_status_endpoints() {
         exit_ip: Some(s4_addr.ip()),
         anonymity: AnonymityLevel::Elite,
         geo: None,
+        throughput_bps: 0,
     });
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -7,7 +7,7 @@ pub mod sources;
 
 pub use bogon::{is_bogon, is_valid_public_ip};
 pub use checker::{resolve_direct_ip, CheckerConfig, ProxyChecker};
-pub use collector::{load_warm_boot_candidates, ProxyScraper};
+pub use collector::{load_warm_boot_candidates, FeedYieldStats, ProxyScraper};
 pub use error::ScraperError;
 pub use extractor::{CandidateExtractor, CandidateProxy};
 pub use sources::{ProxySource, DEFAULT_SOURCES};

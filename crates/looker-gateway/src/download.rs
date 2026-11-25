@@ -122,6 +122,49 @@ pub fn load_resume_state(target_path: &Path, file_handle: &str, file_size: u64) 
     None
 }
 
+fn tmp_sidecar_path(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_os_string();
+    os.push(".tmp");
+    PathBuf::from(os)
+}
+
+pub fn atomic_write_bytes_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = tmp_sidecar_path(path);
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
+        std::io::Write::write_all(&mut f, bytes)?;
+        let _ = f.sync_all();
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+pub async fn atomic_write_bytes_async(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp = tmp_sidecar_path(path);
+    {
+        let mut f = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)
+            .await?;
+        f.write_all(bytes).await?;
+        let _ = f.sync_all().await;
+    }
+    tokio::fs::rename(&tmp, path).await?;
+    Ok(())
+}
+
 pub fn save_resume_state(target_path: &Path, file_handle: &str, file_size: u64, completed: &[usize]) {
     let p = resume_file_path(target_path);
     let state = ResumeState {
@@ -134,7 +177,9 @@ pub fn save_resume_state(target_path: &Path, file_handle: &str, file_size: u64, 
             .as_secs(),
     };
     if let Ok(json) = serde_json::to_string(&state) {
-        let _ = std::fs::write(p, json);
+        if let Err(e) = atomic_write_bytes_sync(&p, json.as_bytes()) {
+            warn!("Failed to atomically write resume state {}: {}", p.display(), e);
+        }
     }
 }
 
@@ -672,7 +717,10 @@ fn spawn_shell_command(cmd: &str) {
     });
 }
 
-async fn save_queue_from_tasks(tasks_lock: &Arc<RwLock<HashMap<String, Arc<ActiveTask>>>>) {
+async fn save_queue_from_tasks_to_path(
+    tasks_lock: &Arc<RwLock<HashMap<String, Arc<ActiveTask>>>>,
+    path: &Path,
+) {
     let active_tasks: Vec<Arc<ActiveTask>> = {
         let tasks_map = tasks_lock.read().await;
         tasks_map.values().cloned().collect()
@@ -684,7 +732,9 @@ async fn save_queue_from_tasks(tasks_lock: &Arc<RwLock<HashMap<String, Arc<Activ
         let chunks_guard = active.completed_chunks.read().await.clone();
         let mut chunk_indices = HashMap::new();
         for (h, set) in chunks_guard.iter() {
-            chunk_indices.insert(h.clone(), set.iter().copied().collect::<Vec<usize>>());
+            let mut list: Vec<usize> = set.iter().copied().collect();
+            list.sort_unstable();
+            chunk_indices.insert(h.clone(), list);
         }
 
         persisted_tasks.push(PersistedTask {
@@ -706,17 +756,161 @@ async fn save_queue_from_tasks(tasks_lock: &Arc<RwLock<HashMap<String, Arc<Activ
         });
     }
 
+    persisted_tasks.sort_by_key(|t| t.created_at);
+
     let queue = PersistedQueue {
         tasks: persisted_tasks,
     };
 
-    let path = get_queue_file_path();
-    if let Some(parent) = path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
+    if let Ok(json) = serde_json::to_string_pretty(&queue) {
+        if let Err(e) = atomic_write_bytes_async(path, json.as_bytes()).await {
+            warn!("Failed to persist queue state to {}: {}", path.display(), e);
+        }
+    }
+}
+
+/// Validates restored single-file partial `.part`/target files on disk so a crash or
+/// reboot never leaves stale chunk bitmaps pointing at missing or truncated disk files.
+fn validate_persisted_task_files(
+    pt: &mut PersistedTask,
+    chunk_map: &mut HashMap<String, HashSet<usize>>,
+    temp_chunk_dir: Option<&str>,
+) -> bool {
+    if pt.status == TaskStatus::Completed || pt.output_path.is_empty() || pt.output_path == pt.output_dir {
+        return false;
     }
 
-    if let Ok(json) = serde_json::to_string_pretty(&queue) {
-        let _ = tokio::fs::write(&path, json).await;
+    let out_path = Path::new(&pt.output_path);
+
+    // Multi-file/folder tasks store `.part` and `.looker-resume` files per-file; individual
+    // files are also validated on resume in `download_single_file`. If the root folder itself
+    // is absent and no temp staging directory is configured, discard stale progress.
+    if out_path.is_dir() || chunk_map.len() > 1 {
+        if !out_path.exists()
+            && temp_chunk_dir.map(|d| d.trim().is_empty()).unwrap_or(true)
+            && (pt.downloaded_bytes > 0 || !chunk_map.is_empty())
+        {
+            warn!(
+                "Persisted folder '{}' is missing on disk for task '{}'; resetting stale progress",
+                out_path.display(),
+                pt.id
+            );
+            chunk_map.clear();
+            pt.downloaded_bytes = 0;
+            pt.progress_percent = 0.0;
+            return true;
+        }
+        return false;
+    }
+
+    if pt.total_bytes == 0 {
+        return false;
+    }
+
+    let single_handle = chunk_map.keys().next().cloned();
+    let temp_part_path = temp_chunk_dir
+        .filter(|d| !d.trim().is_empty())
+        .map(|d| {
+            let file_name_part = out_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .or(single_handle.as_deref())
+                .unwrap_or("partial");
+            PathBuf::from(d).join(format!("{}.part", file_name_part))
+        });
+
+    let final_len = if out_path.is_file() {
+        std::fs::metadata(out_path).ok().map(|m| m.len())
+    } else {
+        None
+    };
+
+    if final_len.map(|l| l >= pt.total_bytes).unwrap_or(false) {
+        // File exists on disk at full length (either finished before crash or sparse-preallocated).
+        // Merge any newer chunk completions from the atomic `.looker-resume` sidecar if present.
+        if let Some(ref handle) = single_handle {
+            if let Some(sidecar) = load_resume_state(out_path, handle, pt.total_bytes) {
+                let set = chunk_map.entry(handle.clone()).or_default();
+                let before = set.len();
+                set.extend(sidecar);
+                if set.len() != before {
+                    let all_chunks: Vec<ChunkInfo> = ChunkIterator::new(pt.total_bytes).collect();
+                    let bytes: u64 = set
+                        .iter()
+                        .filter_map(|&idx| all_chunks.get(idx).map(|c| c.size))
+                        .sum();
+                    pt.downloaded_bytes = bytes;
+                    pt.progress_percent =
+                        ((bytes as f64 / pt.total_bytes as f64) * 1000.0).round() / 10.0;
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    let disk_path = temp_part_path
+        .as_ref()
+        .filter(|p| p.exists())
+        .map(|p| p.as_path())
+        .or_else(|| if out_path.is_file() { Some(out_path) } else { None });
+
+    let disk_len = disk_path.and_then(|p| std::fs::metadata(p).ok().map(|m| m.len()));
+
+    match disk_len {
+        Some(len) if len > 0 => {
+            let all_chunks: Vec<ChunkInfo> = ChunkIterator::new(pt.total_bytes).collect();
+            let mut changed = false;
+            if let Some(ref handle) = single_handle {
+                let set = chunk_map.entry(handle.clone()).or_default();
+                if let Some(sidecar) = load_resume_state(out_path, handle, pt.total_bytes) {
+                    let before = set.len();
+                    set.extend(sidecar);
+                    if set.len() != before {
+                        changed = true;
+                    }
+                }
+                let before_retain = set.len();
+                set.retain(|&idx| {
+                    all_chunks
+                        .get(idx)
+                        .map(|c| c.end_offset() <= len)
+                        .unwrap_or(false)
+                });
+                if set.len() != before_retain {
+                    changed = true;
+                    let valid: Vec<usize> = set.iter().copied().collect();
+                    save_resume_state(out_path, handle, pt.total_bytes, &valid);
+                }
+                let valid_bytes: u64 = set
+                    .iter()
+                    .filter_map(|&idx| all_chunks.get(idx).map(|c| c.size))
+                    .sum();
+                if valid_bytes != pt.downloaded_bytes {
+                    pt.downloaded_bytes = valid_bytes;
+                    pt.progress_percent =
+                        ((valid_bytes as f64 / pt.total_bytes as f64) * 1000.0).round() / 10.0;
+                    changed = true;
+                }
+            }
+            changed
+        }
+        _ => {
+            if pt.downloaded_bytes > 0 || !chunk_map.values().all(|s| s.is_empty()) {
+                warn!(
+                    "Partial file '{}' is missing or 0 bytes on disk for task '{}'; discarding stale resume bitmap",
+                    disk_path.unwrap_or(out_path).display(),
+                    pt.id
+                );
+                chunk_map.clear();
+                pt.downloaded_bytes = 0;
+                pt.progress_percent = 0.0;
+                remove_resume_state(out_path);
+                true
+            } else {
+                false
+            }
+        }
     }
 }
 
@@ -731,23 +925,46 @@ pub struct DownloadManager {
     last_host_509_at: Arc<RwLock<Option<Instant>>>,
     last_509_cmd_at: Arc<RwLock<Option<Instant>>>,
     persist_to_disk: bool,
+    queue_path: PathBuf,
 }
 
 impl DownloadManager {
     pub fn new(gateway_addr: String, pool: Arc<ProxyPool>) -> Self {
         let settings = AppSettings::load();
-        Self::with_settings_and_persistence(gateway_addr, pool, settings, true)
+        Self::with_settings_and_persistence_and_path(
+            gateway_addr,
+            pool,
+            settings,
+            true,
+            get_queue_file_path(),
+        )
     }
 
     pub fn new_ephemeral(gateway_addr: String, pool: Arc<ProxyPool>, settings: AppSettings) -> Self {
-        Self::with_settings_and_persistence(gateway_addr, pool, settings, false)
+        Self::with_settings_and_persistence_and_path(
+            gateway_addr,
+            pool,
+            settings,
+            false,
+            get_queue_file_path(),
+        )
     }
 
-    fn with_settings_and_persistence(
+    pub fn new_with_queue_path(
+        gateway_addr: String,
+        pool: Arc<ProxyPool>,
+        settings: AppSettings,
+        queue_path: PathBuf,
+    ) -> Self {
+        Self::with_settings_and_persistence_and_path(gateway_addr, pool, settings, true, queue_path)
+    }
+
+    fn with_settings_and_persistence_and_path(
         gateway_addr: String,
         pool: Arc<ProxyPool>,
         mut settings: AppSettings,
         persist_to_disk: bool,
+        queue_path: PathBuf,
     ) -> Self {
         settings.sanitize();
         let speed_mbps = settings.speed_limit_mbps.max(0.0);
@@ -770,13 +987,14 @@ impl DownloadManager {
             last_host_509_at: Arc::new(RwLock::new(None)),
             last_509_cmd_at: Arc::new(RwLock::new(None)),
             persist_to_disk,
+            queue_path,
         }
     }
 
-    /// Loads incomplete and completed tasks from `%LOCALAPPDATA%\looker\queue.json` on startup.
-    /// Incomplete tasks are restored in a `Paused` state so downloads survive app restarts.
+    /// Loads incomplete and completed tasks from `queue.json` on startup, validates partial
+    /// files on disk, and safely leaves unfinished tasks `Paused` unless `auto_resume_on_startup` is set.
     pub async fn load_persisted_queue(&self) {
-        let path = get_queue_file_path();
+        let path = self.queue_path.clone();
         if !path.exists() {
             return;
         }
@@ -797,72 +1015,110 @@ impl DownloadManager {
             }
         };
 
-        let mut tasks_map = self.tasks.write().await;
-        let mut max_seq = 0;
+        let (temp_chunk_dir, auto_resume_on_startup) = {
+            let s = self.settings.read().await;
+            (s.temp_chunk_dir.clone(), s.auto_resume_on_startup)
+        };
 
-        for pt in queue.tasks {
-            if let Some(num_str) = pt.id.strip_prefix("task-") {
-                if let Ok(seq) = num_str.parse::<usize>() {
-                    max_seq = max_seq.max(seq);
+        let mut needs_resave = false;
+        let loaded_count;
+        {
+            let mut tasks_map = self.tasks.write().await;
+            let mut max_seq = 0;
+
+            for mut pt in queue.tasks {
+                if let Some(num_str) = pt.id.strip_prefix("task-") {
+                    if let Ok(seq) = num_str.parse::<usize>() {
+                        max_seq = max_seq.max(seq);
+                    }
                 }
+
+                // Restore in Paused state if it was downloading or paused
+                let status = match pt.status {
+                    TaskStatus::Downloading => {
+                        needs_resave = true;
+                        TaskStatus::Paused
+                    }
+                    TaskStatus::Paused => TaskStatus::Paused,
+                    other => other,
+                };
+                pt.status = status;
+
+                let mut chunk_map = HashMap::new();
+                for (handle, list) in std::mem::take(&mut pt.completed_chunk_indices) {
+                    chunk_map.insert(handle, list.into_iter().collect::<HashSet<usize>>());
+                }
+
+                if validate_persisted_task_files(&mut pt, &mut chunk_map, temp_chunk_dir.as_deref()) {
+                    needs_resave = true;
+                }
+
+                let task_info = Arc::new(RwLock::new(TaskInfo {
+                    id: pt.id.clone(),
+                    title: pt.title.clone(),
+                    category: pt.category.clone(),
+                    status,
+                    total_bytes: pt.total_bytes,
+                    downloaded_bytes: pt.downloaded_bytes,
+                    progress_percent: pt.progress_percent,
+                    speed_mbps: 0.0,
+                    eta_seconds: 0,
+                    output_path: pt.output_path.clone(),
+                    error: pt.error.clone(),
+                    routing_mode: pt.routing_mode.clone(),
+                    active_workers: 0,
+                }));
+
+                let is_force = pt.routing_mode.eq_ignore_ascii_case("force_proxy")
+                    || pt.routing_mode.eq_ignore_ascii_case("509_failover");
+                let active = Arc::new(ActiveTask {
+                    info: task_info,
+                    cancel_token: parking_lot::Mutex::new(CancellationToken::new()),
+                    generation: AtomicU64::new(0),
+                    req: DownloadRequest {
+                        url: pt.url,
+                        selected_handles: pt.selected_handles,
+                        output_dir: pt.output_dir,
+                        category: pt.category,
+                        title: Some(pt.title.clone()),
+                    },
+                    completed_chunks: Arc::new(RwLock::new(chunk_map)),
+                    using_proxies: Arc::new(AtomicBool::new(is_force)),
+                    created_at: pt.created_at,
+                });
+
+                tasks_map.insert(pt.id, active);
             }
 
-            // Restore in Paused state if it was downloading or paused
-            let status = match pt.status {
-                TaskStatus::Downloading | TaskStatus::Paused => TaskStatus::Paused,
-                other => other,
-            };
-
-            let mut chunk_map = HashMap::new();
-            for (handle, list) in pt.completed_chunk_indices {
-                chunk_map.insert(handle, list.into_iter().collect::<HashSet<usize>>());
-            }
-
-            let task_info = Arc::new(RwLock::new(TaskInfo {
-                id: pt.id.clone(),
-                title: pt.title.clone(),
-                category: pt.category.clone(),
-                status,
-                total_bytes: pt.total_bytes,
-                downloaded_bytes: pt.downloaded_bytes,
-                progress_percent: pt.progress_percent,
-                speed_mbps: 0.0,
-                eta_seconds: 0,
-                output_path: pt.output_path.clone(),
-                error: pt.error.clone(),
-                routing_mode: pt.routing_mode.clone(),
-                active_workers: 0,
-            }));
-
-            let is_force = pt.routing_mode.eq_ignore_ascii_case("force_proxy")
-                || pt.routing_mode.eq_ignore_ascii_case("509_failover");
-            let active = Arc::new(ActiveTask {
-                info: task_info,
-                cancel_token: parking_lot::Mutex::new(CancellationToken::new()),
-                generation: AtomicU64::new(0),
-                req: DownloadRequest {
-                    url: pt.url,
-                    selected_handles: pt.selected_handles,
-                    output_dir: pt.output_dir,
-                    category: pt.category,
-                    title: Some(pt.title.clone()),
-                },
-                completed_chunks: Arc::new(RwLock::new(chunk_map)),
-                using_proxies: Arc::new(AtomicBool::new(is_force)),
-                created_at: pt.created_at,
-            });
-
-            tasks_map.insert(pt.id, active);
+            self.next_id.store(max_seq + 1, Ordering::Relaxed);
+            loaded_count = tasks_map.len();
         }
 
-        self.next_id.store(max_seq + 1, Ordering::Relaxed);
-        info!("Loaded {} persistent download tasks from {}", tasks_map.len(), path.display());
+        info!(
+            "Loaded {} persistent download tasks from {}",
+            loaded_count,
+            path.display()
+        );
+
+        if needs_resave && self.persist_to_disk {
+            self.save_queue().await;
+        }
+
+        if auto_resume_on_startup {
+            let resumed = self.resume_all_tasks().await;
+            if resumed > 0 {
+                info!(
+                    "Auto-resumed {} persisted task(s) on startup per user settings",
+                    resumed
+                );
+            }
+        }
     }
 
-    /// Persists all current download tasks to disk.
+    /// Persists all current download tasks to disk atomically.
     pub async fn save_queue(&self) {
         if self.persist_to_disk {
-            save_queue_from_tasks(&self.tasks).await;
+            save_queue_from_tasks_to_path(&self.tasks, &self.queue_path).await;
         }
     }
 
@@ -1149,12 +1405,50 @@ impl DownloadManager {
         let completed_chunks = Arc::clone(&active_task.completed_chunks);
         let using_proxies = Arc::clone(&active_task.using_proxies);
         let persist_to_disk = self.persist_to_disk;
+        let queue_path = self.queue_path.clone();
 
         tokio::spawn(async move {
             let mut guard = TaskDropGuard {
                 task_id: task_id.clone(),
                 task_info: Arc::clone(&task_info),
                 completed_cleanly: false,
+            };
+
+            let persist_cancel = cancel_token.child_token();
+            let persist_handle = if persist_to_disk {
+                let p_tasks = Arc::clone(&tasks_map);
+                let p_info = Arc::clone(&task_info);
+                let p_chunks = Arc::clone(&completed_chunks);
+                let p_path = queue_path.clone();
+                let p_cancel = persist_cancel.clone();
+                Some(tokio::spawn(async move {
+                    let mut last_bytes = u64::MAX;
+                    let mut last_chunks = usize::MAX;
+                    let mut last_out = String::new();
+                    let mut ticker = tokio::time::interval(Duration::from_secs(2));
+                    loop {
+                        tokio::select! {
+                            _ = p_cancel.cancelled() => break,
+                            _ = ticker.tick() => {}
+                        }
+                        let (cur_bytes, cur_out) = {
+                            let g = p_info.read().await;
+                            (g.downloaded_bytes, g.output_path.clone())
+                        };
+                        let cur_chunks: usize = {
+                            let g = p_chunks.read().await;
+                            g.values().map(|s| s.len()).sum()
+                        };
+                        if cur_bytes != last_bytes || cur_chunks != last_chunks || cur_out != last_out {
+                            last_bytes = cur_bytes;
+                            last_chunks = cur_chunks;
+                            last_out = cur_out;
+                            save_queue_from_tasks_to_path(&p_tasks, &p_path).await;
+                        }
+                    }
+                }))
+            } else {
+                None
             };
 
             let run_res = run_download_task(
@@ -1173,6 +1467,11 @@ impl DownloadManager {
                 cancel_token.clone(),
             )
             .await;
+
+            persist_cancel.cancel();
+            if let Some(handle) = persist_handle {
+                let _ = handle.await;
+            }
 
             // If a newer resume generation superseded this worker, exit cleanly without overwriting state.
             if active_task.generation.load(Ordering::SeqCst) != worker_gen {
@@ -1214,7 +1513,7 @@ impl DownloadManager {
 
             // Persist updated queue state
             if persist_to_disk {
-                save_queue_from_tasks(&tasks_map).await;
+                save_queue_from_tasks_to_path(&tasks_map, &queue_path).await;
             }
 
             // Check if active queue has 0 remaining downloading tasks
@@ -1740,7 +2039,10 @@ async fn run_download_task(
         };
 
         let current_out = task_info.read().await.output_path.clone();
-        let target_path = if !current_out.is_empty() && current_out != req.output_dir && Path::new(&current_out).exists() {
+        let target_path = if !current_out.is_empty()
+            && current_out != req.output_dir
+            && (Path::new(&current_out).exists() || resume_file_path(Path::new(&current_out)).exists())
+        {
             PathBuf::from(current_out)
         } else {
             resolve_unique_path(&base_out, &meta.name, false, Some(&meta.handle), Some(meta.size))
@@ -1895,6 +2197,11 @@ pub async fn download_single_file(
         return Ok(());
     }
 
+    let existing_disk_len: Option<u64> = tokio::fs::metadata(&active_path)
+        .await
+        .ok()
+        .map(|m| m.len());
+
     let mut already_done = {
         let guard = completed_chunks_map.read().await;
         guard.get(file_handle).cloned().unwrap_or_default()
@@ -1905,6 +2212,68 @@ pub async fn download_single_file(
             already_done.insert(idx);
         }
     }
+
+    // If temp staging is enabled and this file was already moved to final destination in a prior run, skip re-downloading.
+    if is_temp
+        && existing_disk_len.is_none()
+        && out_path.exists()
+        && already_done.len() == total_chunks
+        && tokio::fs::metadata(out_path).await.map(|m| m.len()).unwrap_or(0) == file_size
+    {
+        remove_resume_state(out_path);
+        return Ok(());
+    }
+
+    // Validate resume chunks against actual `.part`/target bytes on disk BEFORE opening/preallocating.
+    let mut state_pruned = false;
+    match existing_disk_len {
+        Some(0) => {
+            if !already_done.is_empty() {
+                warn!(
+                    "Partial file '{}' on disk is 0 bytes; discarding stale resume state for '{}'",
+                    active_path.display(),
+                    file_name
+                );
+                already_done.clear();
+                remove_resume_state(out_path);
+                state_pruned = true;
+            }
+        }
+        Some(disk_len) => {
+            let before_len = already_done.len();
+            already_done.retain(|&idx| {
+                all_chunks
+                    .get(idx)
+                    .map(|c| c.end_offset() <= disk_len)
+                    .unwrap_or(false)
+            });
+            if already_done.len() != before_len {
+                warn!(
+                    "Partial file '{}' is {} bytes on disk; pruned {} out-of-range resume chunks for '{}'",
+                    active_path.display(),
+                    disk_len,
+                    before_len - already_done.len(),
+                    file_name
+                );
+                let retained: Vec<usize> = already_done.iter().copied().collect();
+                save_resume_state(out_path, file_handle, file_size, &retained);
+                state_pruned = true;
+            }
+        }
+        None => {
+            if !already_done.is_empty() {
+                warn!(
+                    "Partial file '{}' is missing on disk; discarding stale resume state for '{}' and restarting from 0",
+                    active_path.display(),
+                    file_name
+                );
+                already_done.clear();
+                remove_resume_state(out_path);
+                state_pruned = true;
+            }
+        }
+    }
+
     {
         let mut map = completed_chunks_map.write().await;
         map.insert(file_handle.to_string(), already_done.clone());
@@ -1934,14 +2303,16 @@ pub async fn download_single_file(
         let mut info = task_info.write().await;
         info.downloaded_bytes = current_cum;
         info.progress_percent = progress.min(100.0);
-    }
-
-    // If temp staging is enabled and this file was already moved to final destination in a prior run, skip re-downloading.
-    if completed_chunks_count == total_chunks && is_temp && !active_path.exists() && out_path.exists() {
-        if tokio::fs::metadata(out_path).await.map(|m| m.len()).unwrap_or(0) == file_size {
-            remove_resume_state(out_path);
-            return Ok(());
-        }
+    } else if state_pruned {
+        let current_cum = cumulative_bytes.load(Ordering::Relaxed);
+        let progress = if grand_total_bytes > 0 {
+            ((current_cum as f64 / grand_total_bytes as f64) * 1000.0).round() / 10.0
+        } else {
+            0.0
+        };
+        let mut info = task_info.write().await;
+        info.downloaded_bytes = current_cum;
+        info.progress_percent = progress.min(100.0);
     }
 
     // 1. Pre-allocate sparse file if needed, preserving existing file content
@@ -2167,6 +2538,9 @@ pub async fn download_single_file(
 
                     let current_url = current_storage_url.read().await.clone();
                     let last_bytes_time_ref = Arc::clone(&last_bytes_time);
+                    let chunk_start = Instant::now();
+                    let chunk_ttfb_ms = Arc::new(AtomicU64::new(0));
+                    let chunk_ttfb_ref = Arc::clone(&chunk_ttfb_ms);
 
                     let download_fut = async {
                         let range_path_url = format!("{}/{}", current_url, chunk.path_range());
@@ -2205,6 +2579,11 @@ pub async fn download_single_file(
                                 r2
                             }
                         };
+
+                        chunk_ttfb_ref.store(
+                            chunk_start.elapsed().as_millis().max(1) as u64,
+                            Ordering::Relaxed,
+                        );
 
                         // Strict Per-Read Stall Timeout on Chunk Streams (abort immediately after 6s of no progress)
                         const PER_READ_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(6);
@@ -2273,6 +2652,31 @@ pub async fn download_single_file(
 
                     match res {
                         Ok(Ok(())) => {
+                            let chunk_elapsed = chunk_start.elapsed();
+                            if let Some(ref cand) = proxy_candidate {
+                                let ttfb = Duration::from_millis(chunk_ttfb_ms.load(Ordering::Relaxed).max(1));
+                                let slow_cooldown = Duration::from_secs(s.proxy_ban_seconds.max(60));
+                                let benched = pool.record_chunk_success(
+                                    cand.addr,
+                                    cand.proto,
+                                    ttfb,
+                                    chunk.size,
+                                    chunk_elapsed,
+                                    slow_cooldown,
+                                );
+                                if benched {
+                                    cached_client = None;
+                                    let kbps = if chunk_elapsed.as_secs_f64() > 0.0 {
+                                        (chunk.size as f64 / 1024.0) / chunk_elapsed.as_secs_f64()
+                                    } else {
+                                        0.0
+                                    };
+                                    warn!(
+                                        "Proxy {} {} crawled at {:.1} KB/s on chunk #{} (<50 KB/s threshold); cooled down & rotated",
+                                        cand.proto, cand.addr, kbps, chunk.index
+                                    );
+                                }
+                            }
                             let is_newly_completed = {
                                 scheduler.lock().mark_completed(chunk.index)
                             };
@@ -2826,6 +3230,169 @@ mod tests {
         assert!(mgr.delete_task(&id1).await);
         assert!(mgr.list_tasks().await.is_empty());
 
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_crash_safe_queue_persistence_and_part_validation() {
+        let mut temp_dir = std::env::temp_dir();
+        temp_dir.push(format!("looker_queue_persist_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let queue_path = temp_dir.join("queue.json");
+        let valid_file_path = temp_dir.join("valid_file.bin");
+        let missing_file_path = temp_dir.join("missing_file.bin");
+
+        let total_size: u64 = 512 * 1024;
+        // Write a real 512 KB partial file on disk for task-1, and save an atomic resume sidecar
+        std::fs::write(&valid_file_path, vec![0xABu8; total_size as usize]).unwrap();
+        save_resume_state(&valid_file_path, "hValid01", total_size, &[0, 1]);
+        assert!(!tmp_sidecar_path(&resume_file_path(&valid_file_path)).exists());
+
+        // Write a queue.json simulating two mid-download tasks interrupted by a crash
+        let queue = PersistedQueue {
+            tasks: vec![
+                PersistedTask {
+                    id: "task-1".to_string(),
+                    title: "Valid Partial File".to_string(),
+                    category: "General".to_string(),
+                    url: "https://mega.nz/file/abc12345#0123456789abcdef0123456789abcdef".to_string(),
+                    output_dir: temp_dir.to_string_lossy().to_string(),
+                    selected_handles: vec![],
+                    status: TaskStatus::Downloading,
+                    total_bytes: total_size,
+                    downloaded_bytes: 131_072,
+                    progress_percent: 25.0,
+                    output_path: valid_file_path.to_string_lossy().to_string(),
+                    error: None,
+                    completed_chunk_indices: HashMap::from([("hValid01".to_string(), vec![0])]),
+                    routing_mode: "passive".to_string(),
+                    created_at: 100,
+                },
+                PersistedTask {
+                    id: "task-2".to_string(),
+                    title: "Deleted Partial File".to_string(),
+                    category: "General".to_string(),
+                    url: "https://mega.nz/file/def67890#0123456789abcdef0123456789abcdef".to_string(),
+                    output_dir: temp_dir.to_string_lossy().to_string(),
+                    selected_handles: vec![],
+                    status: TaskStatus::Downloading,
+                    total_bytes: total_size,
+                    downloaded_bytes: 262_144,
+                    progress_percent: 50.0,
+                    output_path: missing_file_path.to_string_lossy().to_string(),
+                    error: None,
+                    completed_chunk_indices: HashMap::from([("hMissing".to_string(), vec![0, 1])]),
+                    routing_mode: "passive".to_string(),
+                    created_at: 200,
+                },
+            ],
+        };
+        atomic_write_bytes_async(&queue_path, serde_json::to_string_pretty(&queue).unwrap().as_bytes())
+            .await
+            .unwrap();
+        assert!(!tmp_sidecar_path(&queue_path).exists());
+
+        let mut settings = AppSettings::default();
+        settings.default_download_dir = temp_dir.to_string_lossy().to_string();
+        settings.auto_resume_on_startup = false;
+
+        let pool = Arc::new(ProxyPool::new());
+        let mgr = DownloadManager::new_with_queue_path(
+            "127.0.0.1:0".to_string(),
+            pool,
+            settings,
+            queue_path.clone(),
+        );
+        mgr.load_persisted_queue().await;
+
+        let tasks = mgr.list_tasks().await;
+        assert_eq!(tasks.len(), 2);
+
+        let t1 = tasks.iter().find(|t| t.id == "task-1").unwrap();
+        assert_eq!(t1.status, TaskStatus::Paused);
+        // Task 1 picked up chunk 0 + chunk 1 from `.looker-resume`!
+        assert!(t1.downloaded_bytes >= 131_072);
+
+        let t2 = tasks.iter().find(|t| t.id == "task-2").unwrap();
+        assert_eq!(t2.status, TaskStatus::Paused);
+        // Task 2 had missing partial file on disk, so stale progress & chunk map were wiped cleanly!
+        assert_eq!(t2.downloaded_bytes, 0);
+        assert_eq!(t2.progress_percent, 0.0);
+
+        let map = mgr.tasks.read().await;
+        assert!(map.get("task-2").unwrap().completed_chunks.read().await.is_empty());
+        assert_eq!(
+            map.get("task-1")
+                .unwrap()
+                .completed_chunks
+                .read()
+                .await
+                .get("hValid01")
+                .map(|s| s.len()),
+            Some(2)
+        );
+        drop(map);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn test_queue_startup_auto_resume_when_enabled() {
+        let mut temp_dir = std::env::temp_dir();
+        temp_dir.push(format!("looker_queue_autoresume_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let queue_path = temp_dir.join("queue.json");
+        let queue = PersistedQueue {
+            tasks: vec![PersistedTask {
+                id: "task-1".to_string(),
+                title: "Auto Resume Task".to_string(),
+                category: "General".to_string(),
+                url: "https://mega.nz/file/abc12345#0123456789abcdef0123456789abcdef".to_string(),
+                output_dir: temp_dir.to_string_lossy().to_string(),
+                selected_handles: vec![],
+                status: TaskStatus::Downloading,
+                total_bytes: 0,
+                downloaded_bytes: 0,
+                progress_percent: 0.0,
+                output_path: temp_dir.join("dummy.bin").to_string_lossy().to_string(),
+                error: None,
+                completed_chunk_indices: HashMap::new(),
+                routing_mode: "passive".to_string(),
+                created_at: 100,
+            }],
+        };
+        atomic_write_bytes_async(&queue_path, serde_json::to_string_pretty(&queue).unwrap().as_bytes())
+            .await
+            .unwrap();
+
+        let mut settings = AppSettings::default();
+        settings.default_download_dir = temp_dir.to_string_lossy().to_string();
+        settings.auto_resume_on_startup = true;
+
+        let pool = Arc::new(ProxyPool::new());
+        let mgr = DownloadManager::new_with_queue_path(
+            "127.0.0.1:0".to_string(),
+            pool,
+            settings,
+            queue_path.clone(),
+        );
+        mgr.load_persisted_queue().await;
+
+        let tasks = mgr.list_tasks().await;
+        assert_eq!(tasks.len(), 1);
+        assert_ne!(tasks[0].status, TaskStatus::Paused);
+        {
+            let map = mgr.tasks.read().await;
+            let t = map.get("task-1").unwrap();
+            assert_eq!(t.generation.load(Ordering::SeqCst), 1);
+        }
+
+        // Immediately clean up background worker
+        assert!(mgr.delete_task("task-1").await);
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

@@ -83,9 +83,10 @@ fn main() {
                         warm_candidates.len(),
                         warm_file.display()
                     );
-                    let _ = checker
+                    let verified = checker
                         .check_all_streaming(warm_candidates, Arc::clone(&pool_scrape))
                         .await;
+                    scraper.record_survivors(&verified);
                     let stats = pool_scrape.stats();
                     info!(
                         "[LOOKER APP WARM-BOOT COMPLETE] {} healthy proxies available immediately (avg latency: {} ms)",
@@ -110,9 +111,10 @@ fn main() {
                         }
 
                         if !all_to_check.is_empty() {
-                            let _ = checker
+                            let verified = checker
                                 .check_all_streaming(all_to_check, Arc::clone(&pool_scrape))
                                 .await;
+                            scraper.record_survivors(&verified);
                         }
 
                         // Hard 3-strike prune
@@ -149,9 +151,11 @@ fn main() {
                 buffer_size: 16384,
             };
             let gateway = ProxyGateway::new(gateway_config, Arc::clone(&pool_setup));
+            tauri::async_runtime::block_on(gateway.download_manager().load_persisted_queue());
             let gw_cancel = cancel_token_setup.child_token();
 
             tauri::async_runtime::spawn(async move {
+                looker_gateway::spawn_startup_update_check();
                 info!("[LOOKER APP] Gateway listener launching on http://127.0.0.1:8080");
                 if let Err(e) = gateway.run_with_cancellation(gw_cancel).await {
                     tracing::error!("[LOOKER APP] Gateway server error: {}", e);

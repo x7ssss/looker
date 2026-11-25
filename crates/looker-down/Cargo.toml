@@ -4,11 +4,19 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "Native wire-speed downloader binary: parallel chunking through local gateway"
+description = "Native wire-speed downloader binary & headless CLI: parallel chunking through local gateway"
+
+[lib]
+name = "looker_down"
+path = "src/lib.rs"
 
 [[bin]]
 name = "looker-down"
 path = "src/main.rs"
+
+[[bin]]
+name = "looker"
+path = "src/bin/looker.rs"
 
 [dependencies]
 tokio = { workspace = true }
@@ -23,3 +31,7 @@ serde_json = { workspace = true }
 mimalloc = { workspace = true }
 tokio-util = { workspace = true }
 looker-mega = { workspace = true }
+looker-gateway = { workspace = true }
+looker-pool = { workspace = true }
+looker-scraper = { workspace = true }
+looker-geo = { workspace = true }

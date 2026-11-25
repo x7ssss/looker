@@ -55,8 +55,50 @@ pub struct ProxyApiItem {
     pub endpoint: String,
     pub proto: String,
     pub latency_ms: u64,
+    pub success_count: u64,
+    pub failure_count: u64,
+    pub success_rate_pct: u8,
+    pub speed_kbps: f64,
+    pub score: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub country: Option<String>,
-    pub anonymity: String,
+}
+
+fn sort_by_composite_score(items: &mut [Arc<ProxyItem>]) {
+    items.sort_by(|a, b| {
+        b.composite_score()
+            .partial_cmp(&a.composite_score())
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                let ams = a.latency_ms.load(Ordering::Relaxed);
+                let bms = b.latency_ms.load(Ordering::Relaxed);
+                let a_key = if ams == 0 { u64::MAX } else { ams };
+                let b_key = if bms == 0 { u64::MAX } else { bms };
+                a_key.cmp(&b_key)
+            })
+    });
+}
+
+fn item_to_api(item: &ProxyItem) -> ProxyApiItem {
+    let succ = item.successful_requests.load(Ordering::Relaxed);
+    let total = item.total_requests.load(Ordering::Relaxed);
+    let fails = total
+        .saturating_sub(succ)
+        .max(item.total_failures.load(Ordering::Relaxed) as u64);
+    let speed_kbps = ((item.throughput_bps.load(Ordering::Relaxed) as f64 / 1024.0) * 10.0).round() / 10.0;
+    let score = (item.composite_score() * 100.0).round() / 100.0;
+
+    ProxyApiItem {
+        endpoint: item.addr.to_string(),
+        proto: item.proto.to_string().to_uppercase(),
+        latency_ms: item.latency_ms.load(Ordering::Relaxed),
+        success_count: succ,
+        failure_count: fails,
+        success_rate_pct: item.success_rate_pct(),
+        speed_kbps,
+        score,
+        country: item.geo.as_ref().and_then(|g| g.country_code.clone()),
+    }
 }
 
 pub struct ProxyPool {
@@ -123,15 +165,25 @@ impl ProxyPool {
             .find(|i| i.addr == proxy.addr && i.proto == proxy.proto)
         {
             existing.record_success(proxy.latency);
+            if proxy.throughput_bps > 0 {
+                let old_bps = existing.throughput_bps.load(Ordering::Relaxed);
+                let new_bps = if old_bps == 0 {
+                    proxy.throughput_bps
+                } else {
+                    (old_bps * 3 + proxy.throughput_bps) / 4
+                };
+                existing.throughput_bps.store(new_bps, Ordering::Relaxed);
+            }
             existing.consecutive_failures.store(0, Ordering::Relaxed);
             existing.total_failures.store(0, Ordering::Relaxed);
             existing.healthy.store(true, Ordering::Release);
             existing.circuit_open_until_epoch_ms.store(0, Ordering::Relaxed);
         } else {
-            let item = ProxyItem::new(
+            let item = ProxyItem::new_validated(
                 proxy.addr,
                 proxy.proto,
                 proxy.latency,
+                proxy.throughput_bps,
                 proxy.anonymity,
                 proxy.exit_ip,
                 proxy.geo,
@@ -179,29 +231,21 @@ impl ProxyPool {
                 Ok(Arc::clone(healthy[idx]))
             }
             SelectionStrategy::LowestLatency => {
-                let non_cooldown: Vec<&Arc<ProxyItem>> = healthy
+                let non_cooldown: Vec<Arc<ProxyItem>> = healthy
                     .iter()
                     .filter(|i| !self.is_ip_or_subnet_cooldown(i.addr))
-                    .copied()
+                    .map(|i| Arc::clone(i))
                     .collect();
-                let pool_to_use = if non_cooldown.is_empty() {
-                    healthy
+                let mut sorted = if non_cooldown.is_empty() {
+                    healthy.into_iter().cloned().collect()
                 } else {
                     non_cooldown
                 };
-                let mut sorted = pool_to_use;
-                sorted.sort_by_key(|i| {
-                    let ms = i.latency_ms.load(Ordering::Relaxed);
-                    if ms == 0 {
-                        99999
-                    } else {
-                        ms
-                    }
-                });
-                let top_window = sorted.len().min(20);
+                sort_by_composite_score(&mut sorted);
+                let top_window = sorted.len().min(6);
                 let mut rng = rand::thread_rng();
                 let idx = rng.gen_range(0..top_window);
-                Ok(Arc::clone(sorted[idx]))
+                Ok(Arc::clone(&sorted[idx]))
             }
             SelectionStrategy::Random => {
                 let mut rng = rand::thread_rng();
@@ -211,7 +255,7 @@ impl ProxyPool {
         }
     }
 
-    /// Returns a list of healthy proxies sorted by latency for multi-candidate retry loops.
+    /// Returns a list of healthy proxies ranked by composite score (success rate, throughput, latency).
     pub fn get_healthy_candidates(&self, max_candidates: usize) -> Vec<Arc<ProxyItem>> {
         let items = self.items.read();
         let mut healthy: Vec<Arc<ProxyItem>> = items
@@ -220,20 +264,13 @@ impl ProxyPool {
             .map(Arc::clone)
             .collect();
 
-        healthy.sort_by_key(|i| {
-            let ms = i.latency_ms.load(Ordering::Relaxed);
-            if ms == 0 {
-                99999
-            } else {
-                ms
-            }
-        });
+        sort_by_composite_score(&mut healthy);
 
         healthy.truncate(max_candidates);
         healthy
     }
 
-    /// Returns healthy proxy candidates that are not on MEGA 509 cooldown, ordered by "sequential" (fastest latency first) or "random".
+    /// Returns healthy proxy candidates that are not on MEGA 509 cooldown, ordered by "sequential" (composite score descending) or "random".
     /// If all healthy proxies are in cooldown, falls back to regular healthy candidates to prevent hard stalls.
     pub fn get_mega_healthy_candidates_ordered(&self, max_candidates: usize, order: &str) -> Vec<Arc<ProxyItem>> {
         let items = self.items.read();
@@ -257,15 +294,8 @@ impl ProxyPool {
                 let mut rng = rand::thread_rng();
                 fallback.shuffle(&mut rng);
             } else {
-                fallback.sort_by_key(|i| {
-                    let ms = i.latency_ms.load(Ordering::Relaxed);
-                    if ms == 0 {
-                        99999
-                    } else {
-                        ms
-                    }
-                });
-                let top_window = fallback.len().min(20);
+                sort_by_composite_score(&mut fallback);
+                let top_window = fallback.len().min(6);
                 if top_window > 1 {
                     use rand::seq::SliceRandom;
                     let mut rng = rand::thread_rng();
@@ -281,16 +311,9 @@ impl ProxyPool {
             let mut rng = rand::thread_rng();
             mega_healthy.shuffle(&mut rng);
         } else {
-            mega_healthy.sort_by_key(|i| {
-                let ms = i.latency_ms.load(Ordering::Relaxed);
-                if ms == 0 {
-                    99999
-                } else {
-                    ms
-                }
-            });
-            // Top-20 Jitter in fastest first / sequential mode to prevent dogpiling
-            let top_window = mega_healthy.len().min(20);
+            sort_by_composite_score(&mut mega_healthy);
+            // Light top-6 jitter among highest-scoring nodes to spread chunk load without pulling in slow proxies
+            let top_window = mega_healthy.len().min(6);
             if top_window > 1 {
                 use rand::seq::SliceRandom;
                 let mut rng = rand::thread_rng();
@@ -560,6 +583,55 @@ impl ProxyPool {
         item.record_success(latency);
     }
 
+    /// Records a completed chunk transfer for a proxy, updating success count, latency,
+    /// and moving-average throughput. Returns `true` if the proxy crawled under 50 KB/s
+    /// and was benched/cooled down.
+    pub fn record_chunk_success(
+        &self,
+        addr: SocketAddr,
+        proto: ProxyProto,
+        latency: Duration,
+        bytes: u64,
+        elapsed: Duration,
+        slow_cooldown: Duration,
+    ) -> bool {
+        let benched = {
+            let items = self.items.read();
+            if let Some(item) = items.iter().find(|i| i.addr == addr && i.proto == proto) {
+                item.record_transfer_success(latency, bytes, elapsed, slow_cooldown)
+            } else {
+                false
+            }
+        };
+        if benched {
+            self.working_count.store(self.healthy_count(), Ordering::Relaxed);
+        }
+        benched
+    }
+
+    /// Records throughput observed on a CONNECT tunnel without double-counting handshake success.
+    pub fn record_tunnel_throughput(
+        &self,
+        addr: SocketAddr,
+        proto: ProxyProto,
+        bytes: u64,
+        elapsed: Duration,
+        slow_cooldown: Duration,
+    ) -> bool {
+        let benched = {
+            let items = self.items.read();
+            if let Some(item) = items.iter().find(|i| i.addr == addr && i.proto == proto) {
+                item.record_throughput(bytes, elapsed, slow_cooldown)
+            } else {
+                false
+            }
+        };
+        if benched {
+            self.working_count.store(self.healthy_count(), Ordering::Relaxed);
+        }
+        benched
+    }
+
     /// Exports all currently healthy proxies to the specified directory hierarchy:
     /// - <out_dir>/proxies.json
     /// - <out_dir>/proxies/all.txt
@@ -644,26 +716,26 @@ impl ProxyPool {
     }
 
     pub fn api_fastest(&self, limit: usize) -> Vec<ProxyApiItem> {
-        let fastest = self.fastest.read();
-        if !fastest.is_empty() {
-            fastest
-                .iter()
-                .take(limit)
-                .map(|p| ProxyApiItem {
-                    endpoint: p.addr.to_string(),
-                    proto: p.proto.to_string().to_uppercase(),
-                    latency_ms: p.latency.as_millis() as u64,
-                    country: p.geo.as_ref().and_then(|g| g.country_code.clone()),
-                    anonymity: match p.anonymity {
-                        AnonymityLevel::Elite => "Elite".to_string(),
-                        AnonymityLevel::Anonymous => "Anonymous".to_string(),
-                        AnonymityLevel::Transparent => "Transparent".to_string(),
-                    },
-                })
-                .collect()
-        } else {
-            self.api_proxies(None, Some(limit))
+        let live = self.api_proxies(None, Some(limit));
+        if !live.is_empty() {
+            return live;
         }
+        let fastest = self.fastest.read();
+        fastest
+            .iter()
+            .take(limit)
+            .map(|p| ProxyApiItem {
+                endpoint: p.addr.to_string(),
+                proto: p.proto.to_string().to_uppercase(),
+                latency_ms: p.latency.as_millis() as u64,
+                success_count: 1,
+                failure_count: 0,
+                success_rate_pct: 100,
+                speed_kbps: ((p.throughput_bps as f64 / 1024.0) * 10.0).round() / 10.0,
+                score: 0.0,
+                country: p.geo.as_ref().and_then(|g| g.country_code.clone()),
+            })
+            .collect()
     }
 
     pub fn api_proxies(&self, proto_filter: Option<ProxyProto>, limit: Option<usize>) -> Vec<ProxyApiItem> {
@@ -683,29 +755,12 @@ impl ProxyPool {
             })
             .map(Arc::clone)
             .collect();
-        healthy.sort_by_key(|i| {
-            let ms = i.latency_ms.load(Ordering::Relaxed);
-            if ms == 0 {
-                99999
-            } else {
-                ms
-            }
-        });
+        sort_by_composite_score(&mut healthy);
         let take_count = limit.unwrap_or(healthy.len());
         healthy
             .iter()
             .take(take_count)
-            .map(|item| ProxyApiItem {
-                endpoint: item.addr.to_string(),
-                proto: item.proto.to_string().to_uppercase(),
-                latency_ms: item.latency_ms.load(Ordering::Relaxed),
-                country: item.geo.as_ref().and_then(|g| g.country_code.clone()),
-                anonymity: match item.anonymity {
-                    AnonymityLevel::Elite => "Elite".to_string(),
-                    AnonymityLevel::Anonymous => "Anonymous".to_string(),
-                    AnonymityLevel::Transparent => "Transparent".to_string(),
-                },
-            })
+            .map(|item| item_to_api(item))
             .collect()
     }
 
@@ -727,49 +782,55 @@ impl ProxyPool {
     }
 }
 
-/// Exports protocol-segregated proxy hierarchy to disk with clean live survivors only.
+fn atomic_write_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let tmp_path = std::path::PathBuf::from(format!("{}.tmp", path.display()));
+    {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(bytes)?;
+        let _ = f.sync_all();
+    }
+    std::fs::rename(&tmp_path, path)?;
+    Ok(())
+}
+
+/// Exports protocol-segregated proxy hierarchy to disk with clean live survivors only (atomic .tmp -> rename).
 pub fn export_disk_hierarchy(out_dir: &std::path::Path, proxies: &[CheckedProxy]) -> std::io::Result<()> {
+    use std::fmt::Write as _;
     std::fs::create_dir_all(out_dir)?;
     let sub_dir = out_dir.join("proxies");
     std::fs::create_dir_all(&sub_dir)?;
 
     // 1. out/proxies.json
-    let json_path = out_dir.join("proxies.json");
-    let json_file = std::fs::File::create(&json_path)?;
-    serde_json::to_writer_pretty(json_file, proxies)
+    let json_bytes = serde_json::to_vec_pretty(proxies)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    atomic_write_file(&out_dir.join("proxies.json"), &json_bytes)?;
 
     // 2. out/proxies/all.txt (proto://host:port)
-    let all_path = sub_dir.join("all.txt");
-    let mut all_file = std::fs::File::create(&all_path)?;
+    let mut all_txt = String::new();
+    let mut http_txt = String::new();
+    let mut socks4_txt = String::new();
+    let mut socks5_txt = String::new();
+
     for p in proxies {
-        use std::io::Write;
-        writeln!(all_file, "{}", p.to_url())?;
+        let _ = writeln!(all_txt, "{}", p.to_url());
+        match p.proto {
+            ProxyProto::HttpConnect => {
+                let _ = writeln!(http_txt, "{}", p.addr);
+            }
+            ProxyProto::Socks4 => {
+                let _ = writeln!(socks4_txt, "{}", p.addr);
+            }
+            ProxyProto::Socks5 => {
+                let _ = writeln!(socks5_txt, "{}", p.addr);
+            }
+        }
     }
 
-    // 3. out/proxies/http.txt (host:port)
-    let http_path = sub_dir.join("http.txt");
-    let mut http_file = std::fs::File::create(&http_path)?;
-    for p in proxies.iter().filter(|p| p.proto == ProxyProto::HttpConnect) {
-        use std::io::Write;
-        writeln!(http_file, "{}", p.addr)?;
-    }
-
-    // 4. out/proxies/socks4.txt (host:port)
-    let socks4_path = sub_dir.join("socks4.txt");
-    let mut socks4_file = std::fs::File::create(&socks4_path)?;
-    for p in proxies.iter().filter(|p| p.proto == ProxyProto::Socks4) {
-        use std::io::Write;
-        writeln!(socks4_file, "{}", p.addr)?;
-    }
-
-    // 5. out/proxies/socks5.txt (host:port)
-    let socks5_path = sub_dir.join("socks5.txt");
-    let mut socks5_file = std::fs::File::create(&socks5_path)?;
-    for p in proxies.iter().filter(|p| p.proto == ProxyProto::Socks5) {
-        use std::io::Write;
-        writeln!(socks5_file, "{}", p.addr)?;
-    }
+    atomic_write_file(&sub_dir.join("all.txt"), all_txt.as_bytes())?;
+    atomic_write_file(&sub_dir.join("http.txt"), http_txt.as_bytes())?;
+    atomic_write_file(&sub_dir.join("socks4.txt"), socks4_txt.as_bytes())?;
+    atomic_write_file(&sub_dir.join("socks5.txt"), socks5_txt.as_bytes())?;
 
     Ok(())
 }
@@ -832,6 +893,7 @@ mod tests {
             exit_ip: Some("3.3.3.3".parse().unwrap()),
             anonymity: AnonymityLevel::Elite,
             geo: None,
+            throughput_bps: 0,
         };
         pool.add_or_update(checked);
 
@@ -1058,5 +1120,82 @@ mod tests {
         assert!(pool.is_subnet_cooldown(subnet));
         // ep6 in the same subnet is now blocked by subnet-level cooldown!
         assert!(pool.is_ip_or_subnet_cooldown(ep6));
+    }
+
+    #[test]
+    fn test_composite_score_and_slow_crawl_cooldown() {
+        let pool = ProxyPool::new();
+        let fast_reliable: SocketAddr = "8.8.4.1:1080".parse().unwrap();
+        let low_ping_flaky: SocketAddr = "8.8.4.2:1080".parse().unwrap();
+        let slow_crawler: SocketAddr = "8.8.4.3:1080".parse().unwrap();
+
+        pool.add_or_update(CheckedProxy {
+            addr: fast_reliable,
+            proto: ProxyProto::Socks5,
+            latency: Duration::from_millis(200),
+            exit_ip: None,
+            anonymity: AnonymityLevel::Elite,
+            geo: None,
+            throughput_bps: 0,
+        });
+        pool.add_or_update(CheckedProxy {
+            addr: low_ping_flaky,
+            proto: ProxyProto::Socks5,
+            latency: Duration::from_millis(40),
+            exit_ip: None,
+            anonymity: AnonymityLevel::Elite,
+            geo: None,
+            throughput_bps: 0,
+        });
+        pool.add_or_update(CheckedProxy {
+            addr: slow_crawler,
+            proto: ProxyProto::Socks5,
+            latency: Duration::from_millis(60),
+            exit_ip: None,
+            anonymity: AnonymityLevel::Elite,
+            geo: None,
+            throughput_bps: 0,
+        });
+
+        // fast_reliable delivers 5 fast 1 MB chunks in 0.5s (~2 MB/s)
+        for _ in 0..5 {
+            assert!(!pool.record_chunk_success(
+                fast_reliable,
+                ProxyProto::Socks5,
+                Duration::from_millis(180),
+                1024 * 1024,
+                Duration::from_millis(500),
+                Duration::from_secs(120),
+            ));
+        }
+
+        // low_ping_flaky has 1 failure + 1 slowish success
+        pool.record_failure_by_addr(low_ping_flaky, ProxyProto::Socks5);
+        pool.record_chunk_success(
+            low_ping_flaky,
+            ProxyProto::Socks5,
+            Duration::from_millis(40),
+            128 * 1024,
+            Duration::from_secs(1),
+            Duration::from_secs(120),
+        );
+
+        // slow_crawler delivers 64 KB over 4s = 16 KB/s (< 50 KB/s) -> gets benched immediately!
+        let benched = pool.record_chunk_success(
+            slow_crawler,
+            ProxyProto::Socks5,
+            Duration::from_millis(60),
+            64 * 1024,
+            Duration::from_secs(4),
+            Duration::from_secs(120),
+        );
+        assert!(benched);
+
+        let ranked = pool.api_proxies(None, None);
+        assert_eq!(ranked[0].endpoint, "8.8.4.1:1080");
+        assert!(ranked[0].speed_kbps > 1000.0);
+        assert_eq!(ranked[0].success_rate_pct, 100);
+        // slow_crawler should be excluded from healthy/active pool during cooldown
+        assert!(!ranked.iter().any(|p| p.endpoint == "8.8.4.3:1080"));
     }
 }

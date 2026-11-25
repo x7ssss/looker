@@ -228,9 +228,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // 3. Run streaming validation pipeline (immediate pool insertion)
                     if !all_to_check.is_empty() {
-                        let _verified = checker_clone
+                        let verified = checker_clone
                             .check_all_streaming(all_to_check, Arc::clone(&pool_clone))
                             .await;
+                        scraper_clone.record_survivors(&verified);
                     }
 
                     // 4. Hard 3-strike dead prune

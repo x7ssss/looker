@@ -91,6 +91,10 @@ impl ProxyGateway {
         self
     }
 
+    pub fn download_manager(&self) -> Arc<DownloadManager> {
+        Arc::clone(&self.download_mgr)
+    }
+
     /// Launches the gateway server loop listening on `config.bind_addr`.
     pub async fn run(&self) -> Result<(), GatewayError> {
         self.run_with_cancellation(tokio_util::sync::CancellationToken::new()).await
@@ -942,6 +946,20 @@ async fn handle_client(
         return Ok(());
     }
 
+    // Route 5m: Quiet Cached Release Update Status (GET /api/update)
+    if method.eq_ignore_ascii_case("GET") && req_path == "/api/update" {
+        let status = crate::update::get_cached_update_status();
+        let json = serde_json::to_string(&status).unwrap_or_else(|_| "{}".to_string());
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nCache-Control: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
     // Favicon endpoint to eliminate 405 Method Not Allowed
     if method.eq_ignore_ascii_case("GET") && req_path == "/favicon.ico" {
         let resp = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -1008,6 +1026,8 @@ async fn handle_client(
 
     let mut upstream_opt = None;
 
+    let mut connected_candidate = None;
+
     for candidate in &candidates {
         let t0 = Instant::now();
         debug!(
@@ -1061,6 +1081,7 @@ async fn handle_client(
         match handshake_res {
             Ok(Ok(())) => {
                 pool.record_success(candidate, t0.elapsed());
+                connected_candidate = Some((candidate.addr, candidate.proto));
                 upstream_opt = Some(upstream);
                 break;
             }
@@ -1093,8 +1114,19 @@ async fn handle_client(
     client_stream.flush().await?;
 
     // The tunnel is now committed and becomes an opaque bidirectional pipe.
+    let tunnel_start = Instant::now();
     let (from_client, from_upstream) =
         tokio::io::copy_bidirectional(&mut client_stream, &mut upstream_stream).await?;
+
+    if let Some((cand_addr, cand_proto)) = connected_candidate {
+        pool.record_tunnel_throughput(
+            cand_addr,
+            cand_proto,
+            from_upstream,
+            tunnel_start.elapsed(),
+            Duration::from_secs(120),
+        );
+    }
 
     debug!(
         "Tunnel closed for {}: client sent {} bytes, upstream sent {} bytes",

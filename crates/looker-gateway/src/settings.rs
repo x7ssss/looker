@@ -32,6 +32,9 @@ pub struct AppSettings {
     #[serde(default)]
     pub freeze_before_start: bool,
 
+    #[serde(default)]
+    pub auto_resume_on_startup: bool,
+
     #[serde(default = "default_routing_mode")]
     pub routing_mode: String,
 
@@ -111,6 +114,7 @@ impl Default for AppSettings {
             clipboard_monitor: false,
             auto_accept_folders: false,
             freeze_before_start: false,
+            auto_resume_on_startup: false,
             routing_mode: default_routing_mode(),
             sticky_509_seconds: default_sticky_509_seconds(),
             proxy_selection_order: default_proxy_selection_order(),
@@ -220,7 +224,7 @@ impl AppSettings {
         def
     }
 
-    /// Saves settings to `%LOCALAPPDATA%\looker\settings.json`.
+    /// Atomically saves settings to `%LOCALAPPDATA%\looker\settings.json` (.tmp -> rename).
     pub fn save(&self) -> Result<(), String> {
         let path = get_settings_file_path();
         if let Some(parent) = path.parent() {
@@ -228,11 +232,20 @@ impl AppSettings {
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-        std::fs::write(&path, json)
-            .map_err(|e| format!("Failed to write settings to {}: {}", path.display(), e))
+        let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&tmp_path)
+                .map_err(|e| format!("Failed to create temp settings {}: {}", tmp_path.display(), e))?;
+            file.write_all(json.as_bytes())
+                .map_err(|e| format!("Failed to write temp settings {}: {}", tmp_path.display(), e))?;
+            let _ = file.sync_all();
+        }
+        std::fs::rename(&tmp_path, &path)
+            .map_err(|e| format!("Failed to commit settings to {}: {}", path.display(), e))
     }
 
-    /// Asynchronously saves settings to `%LOCALAPPDATA%\looker\settings.json`.
+    /// Atomically and asynchronously saves settings to `%LOCALAPPDATA%\looker\settings.json` (.tmp -> rename).
     pub async fn save_async(&self) -> Result<(), String> {
         let path = get_settings_file_path();
         if let Some(parent) = path.parent() {
@@ -240,9 +253,20 @@ impl AppSettings {
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-        tokio::fs::write(&path, json)
+        let tmp_path = PathBuf::from(format!("{}.tmp", path.display()));
+        {
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::File::create(&tmp_path)
+                .await
+                .map_err(|e| format!("Failed to create temp settings {}: {}", tmp_path.display(), e))?;
+            file.write_all(json.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write temp settings {}: {}", tmp_path.display(), e))?;
+            let _ = file.sync_all().await;
+        }
+        tokio::fs::rename(&tmp_path, &path)
             .await
-            .map_err(|e| format!("Failed to write settings to {}: {}", path.display(), e))
+            .map_err(|e| format!("Failed to commit settings to {}: {}", path.display(), e))
     }
 }
 

@@ -114,6 +114,11 @@ jobs:
     name: Publish GitHub Release
     needs: [build-windows, build-linux]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
     steps:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
@@ -138,8 +143,14 @@ jobs:
           sha256sum Looker-Setup-x64.exe Looker-Linux-x64.AppImage Looker-Linux-x64.deb > checksums.sha256
           cat checksums.sha256
 
+      - name: Generate SLSA build provenance attestations
+        uses: actions/attest@v4
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        with:
+          subject-path: 'release-artifacts/Looker-*'
+
       - name: Publish to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         with:
           files: |

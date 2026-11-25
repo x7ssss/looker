@@ -3,6 +3,7 @@ pub mod error;
 pub mod logging;
 pub mod server;
 pub mod settings;
+pub mod update;
 
 pub use download::{
     DownloadManager, DownloadRequest, InspectNode, InspectResponse, TaskInfo, TaskStatus,
@@ -11,6 +12,7 @@ pub use error::GatewayError;
 pub use logging::{global_log_buffer, DebugLogEntry, LogBuffer, LogBufferLayer};
 pub use server::{GatewayConfig, ProxyGateway};
 pub use settings::AppSettings;
+pub use update::{get_cached_update_status, spawn_startup_update_check, UpdateStatus};
 
 use std::path::PathBuf;
 

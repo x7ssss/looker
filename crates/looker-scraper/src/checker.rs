@@ -275,6 +275,7 @@ impl ProxyChecker {
                     exit_ip: Some(exit_ip),
                     anonymity,
                     geo: geo_opt,
+                    throughput_bps: 0,
                 })
             };
 
