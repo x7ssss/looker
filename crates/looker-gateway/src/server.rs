@@ -307,7 +307,7 @@ async fn handle_client(
 
     // Handle CORS preflight
     if method.eq_ignore_ascii_case("OPTIONS") {
-        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n";
+        let resp = "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nConnection: close\r\n\r\n";
         client_stream.write_all(resp.as_bytes()).await?;
         client_stream.flush().await?;
         return Ok(());
@@ -590,6 +590,48 @@ async fn handle_client(
             "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             json_body.len(),
             json_body
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5c-1: Pause All MEGA Download Tasks (POST /api/mega/tasks/pause-all)
+    if method.eq_ignore_ascii_case("POST") && req_path == "/api/mega/tasks/pause-all" {
+        let paused = download_mgr.pause_all_tasks().await;
+        let json = serde_json::json!({ "success": true, "paused": paused }).to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5c-2: Resume All MEGA Download Tasks (POST /api/mega/tasks/resume-all)
+    if method.eq_ignore_ascii_case("POST") && req_path == "/api/mega/tasks/resume-all" {
+        let resumed = download_mgr.resume_all_tasks().await;
+        let json = serde_json::json!({ "success": true, "resumed": resumed }).to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
+        );
+        client_stream.write_all(resp.as_bytes()).await?;
+        client_stream.flush().await?;
+        return Ok(());
+    }
+
+    // Route 5c-3: Clear Completed MEGA Download Tasks (POST /api/mega/tasks/clear-completed)
+    if method.eq_ignore_ascii_case("POST") && req_path == "/api/mega/tasks/clear-completed" {
+        let cleared = download_mgr.clear_completed_tasks().await;
+        let json = serde_json::json!({ "success": true, "cleared": cleared }).to_string();
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json; charset=utf-8\r\nAccess-Control-Allow-Origin: *\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            json.len(),
+            json
         );
         client_stream.write_all(resp.as_bytes()).await?;
         client_stream.flush().await?;

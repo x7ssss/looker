@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 /// Complete power-user application settings for Looker.
 /// Persisted to `%LOCALAPPDATA%\looker\settings.json`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AppSettings {
     #[serde(default = "default_download_dir")]
     pub default_download_dir: String,
@@ -18,7 +18,7 @@ pub struct AppSettings {
     pub slots_per_file: usize,
 
     #[serde(default)]
-    pub speed_limit_kbps: u64,
+    pub speed_limit_mbps: f64,
 
     #[serde(default = "default_true")]
     pub verify_cbc_mac: bool,
@@ -106,7 +106,7 @@ impl Default for AppSettings {
             temp_chunk_dir: None,
             max_parallel_downloads: default_max_parallel_downloads(),
             slots_per_file: default_slots_per_file(),
-            speed_limit_kbps: 0,
+            speed_limit_mbps: 0.0,
             verify_cbc_mac: true,
             clipboard_monitor: false,
             auto_accept_folders: false,
@@ -150,6 +150,9 @@ impl AppSettings {
 
         self.max_parallel_downloads = self.max_parallel_downloads.clamp(1, 10);
         self.slots_per_file = self.slots_per_file.clamp(1, 24);
+        if !self.speed_limit_mbps.is_finite() || self.speed_limit_mbps < 0.0 {
+            self.speed_limit_mbps = 0.0;
+        }
 
         if !self.routing_mode.eq_ignore_ascii_case("force_proxy")
             && !self.routing_mode.eq_ignore_ascii_case("force")
@@ -195,6 +198,18 @@ impl AppSettings {
         if path.exists() {
             if let Ok(contents) = std::fs::read_to_string(&path) {
                 if let Ok(mut settings) = serde_json::from_str::<AppSettings>(&contents) {
+                    // Migrate legacy speed_limit_kbps if speed_limit_mbps was not set
+                    if settings.speed_limit_mbps == 0.0 {
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&contents) {
+                            if val.get("speed_limit_mbps").is_none() {
+                                if let Some(kbps) = val.get("speed_limit_kbps").and_then(|v| v.as_f64()) {
+                                    if kbps > 0.0 {
+                                        settings.speed_limit_mbps = ((kbps / 1024.0) * 100.0).round() / 100.0;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     settings.sanitize();
                     return settings;
                 }
@@ -251,6 +266,7 @@ mod tests {
 
         settings.max_parallel_downloads = 999;
         settings.slots_per_file = 0;
+        settings.speed_limit_mbps = -5.0;
         settings.routing_mode = "FORCE".to_string();
         settings.proxy_selection_order = "RANDOM".to_string();
         settings.stall_watchdog_seconds = 1;
@@ -258,6 +274,7 @@ mod tests {
 
         assert_eq!(settings.max_parallel_downloads, 10);
         assert_eq!(settings.slots_per_file, 1);
+        assert_eq!(settings.speed_limit_mbps, 0.0);
         assert_eq!(settings.routing_mode, "force_proxy");
         assert_eq!(settings.proxy_selection_order, "random");
         assert_eq!(settings.stall_watchdog_seconds, 5);
@@ -265,9 +282,24 @@ mod tests {
 
     #[test]
     fn test_settings_serde_roundtrip() {
-        let original = AppSettings::default();
+        let mut original = AppSettings::default();
+        original.speed_limit_mbps = 7.5;
         let serialized = serde_json::to_string(&original).expect("serialize");
         let deserialized: AppSettings = serde_json::from_str(&serialized).expect("deserialize");
         assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn test_legacy_kbps_migration_logic() {
+        let legacy_json = r#"{"speed_limit_kbps": 5120, "slots_per_file": 8}"#;
+        let mut settings: AppSettings = serde_json::from_str(legacy_json).unwrap();
+        let val: serde_json::Value = serde_json::from_str(legacy_json).unwrap();
+        if settings.speed_limit_mbps == 0.0 && val.get("speed_limit_mbps").is_none() {
+            if let Some(kbps) = val.get("speed_limit_kbps").and_then(|v| v.as_f64()) {
+                settings.speed_limit_mbps = ((kbps / 1024.0) * 100.0).round() / 100.0;
+            }
+        }
+        assert_eq!(settings.speed_limit_mbps, 5.0);
+        assert_eq!(settings.slots_per_file, 8);
     }
 }

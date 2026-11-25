@@ -640,7 +640,8 @@ pub fn get_queue_file_path() -> PathBuf {
 
 struct ActiveTask {
     info: Arc<RwLock<TaskInfo>>,
-    cancel_token: CancellationToken,
+    cancel_token: parking_lot::Mutex<CancellationToken>,
+    generation: AtomicU64,
     req: DownloadRequest,
     completed_chunks: Arc<RwLock<HashMap<String, HashSet<usize>>>>,
     using_proxies: Arc<AtomicBool>,
@@ -729,16 +730,27 @@ pub struct DownloadManager {
     next_id: AtomicUsize,
     last_host_509_at: Arc<RwLock<Option<Instant>>>,
     last_509_cmd_at: Arc<RwLock<Option<Instant>>>,
+    persist_to_disk: bool,
 }
 
 impl DownloadManager {
     pub fn new(gateway_addr: String, pool: Arc<ProxyPool>) -> Self {
         let settings = AppSettings::load();
-        let speed_mbps = if settings.speed_limit_kbps > 0 {
-            settings.speed_limit_kbps as f64 / 1024.0
-        } else {
-            0.0
-        };
+        Self::with_settings_and_persistence(gateway_addr, pool, settings, true)
+    }
+
+    pub fn new_ephemeral(gateway_addr: String, pool: Arc<ProxyPool>, settings: AppSettings) -> Self {
+        Self::with_settings_and_persistence(gateway_addr, pool, settings, false)
+    }
+
+    fn with_settings_and_persistence(
+        gateway_addr: String,
+        pool: Arc<ProxyPool>,
+        mut settings: AppSettings,
+        persist_to_disk: bool,
+    ) -> Self {
+        settings.sanitize();
+        let speed_mbps = settings.speed_limit_mbps.max(0.0);
         let rate_limiter = Arc::new(RateLimiter::new(speed_mbps));
         let config = DownloaderConfig {
             routing_mode: settings.routing_mode.clone(),
@@ -757,6 +769,7 @@ impl DownloadManager {
             next_id: AtomicUsize::new(1),
             last_host_509_at: Arc::new(RwLock::new(None)),
             last_509_cmd_at: Arc::new(RwLock::new(None)),
+            persist_to_disk,
         }
     }
 
@@ -821,10 +834,12 @@ impl DownloadManager {
                 active_workers: 0,
             }));
 
-            let is_force = pt.routing_mode.eq_ignore_ascii_case("force_proxy");
+            let is_force = pt.routing_mode.eq_ignore_ascii_case("force_proxy")
+                || pt.routing_mode.eq_ignore_ascii_case("509_failover");
             let active = Arc::new(ActiveTask {
                 info: task_info,
-                cancel_token: CancellationToken::new(),
+                cancel_token: parking_lot::Mutex::new(CancellationToken::new()),
+                generation: AtomicU64::new(0),
                 req: DownloadRequest {
                     url: pt.url,
                     selected_handles: pt.selected_handles,
@@ -846,7 +861,9 @@ impl DownloadManager {
 
     /// Persists all current download tasks to disk.
     pub async fn save_queue(&self) {
-        save_queue_from_tasks(&self.tasks).await;
+        if self.persist_to_disk {
+            save_queue_from_tasks(&self.tasks).await;
+        }
     }
 
     /// Gets current application settings.
@@ -863,11 +880,7 @@ impl DownloadManager {
     /// Updates application settings, enforces constraints, persists to disk, and applies rate limit.
     pub async fn update_settings(&self, mut new_settings: AppSettings) -> AppSettings {
         new_settings.sanitize();
-        let speed_mbps = if new_settings.speed_limit_kbps > 0 {
-            new_settings.speed_limit_kbps as f64 / 1024.0
-        } else {
-            0.0
-        };
+        let speed_mbps = new_settings.speed_limit_mbps.max(0.0);
         self.rate_limiter.set_limit(speed_mbps);
 
         {
@@ -878,7 +891,9 @@ impl DownloadManager {
             cfg.speed_limit_mbps = speed_mbps;
         }
 
-        let _ = new_settings.save_async().await;
+        if self.persist_to_disk {
+            let _ = new_settings.save_async().await;
+        }
         let mut s = self.settings.write().await;
         *s = new_settings.clone();
         new_settings
@@ -908,8 +923,10 @@ impl DownloadManager {
             s.routing_mode = cfg.routing_mode.clone();
             s.slots_per_file = cfg.workers_per_file;
             s.max_parallel_downloads = cfg.max_concurrent_files;
-            s.speed_limit_kbps = (cfg.speed_limit_mbps * 1024.0).round() as u64;
-            let _ = s.save_async().await;
+            s.speed_limit_mbps = cfg.speed_limit_mbps;
+            if self.persist_to_disk {
+                let _ = s.save_async().await;
+            }
         }
         cfg
     }
@@ -1018,7 +1035,9 @@ impl DownloadManager {
                     .unwrap_or_else(|| settings_guard.default_download_dir.clone());
             } else {
                 settings_guard.last_used_download_dir = Some(req.output_dir.clone());
-                let _ = settings_guard.save_async().await;
+                if self.persist_to_disk {
+                    let _ = settings_guard.save_async().await;
+                }
             }
             settings_guard.clone()
         };
@@ -1074,9 +1093,11 @@ impl DownloadManager {
             active_workers: 0,
         }));
 
+        let initial_gen = if s.freeze_before_start { 0 } else { 1 };
         let active_task = Arc::new(ActiveTask {
             info: Arc::clone(&task_info),
-            cancel_token: cancel_token.clone(),
+            cancel_token: parking_lot::Mutex::new(cancel_token.clone()),
+            generation: AtomicU64::new(initial_gen),
             req: req.clone(),
             completed_chunks: Arc::new(RwLock::new(HashMap::new())),
             using_proxies: Arc::clone(&using_proxies),
@@ -1100,6 +1121,7 @@ impl DownloadManager {
                 link,
                 req,
                 cancel_token,
+                initial_gen,
             );
         }
 
@@ -1113,6 +1135,7 @@ impl DownloadManager {
         link: MegaLink,
         req: DownloadRequest,
         cancel_token: CancellationToken,
+        worker_gen: u64,
     ) {
         let gateway_addr = self.gateway_addr.clone();
         let pool = Arc::clone(&self.pool);
@@ -1125,6 +1148,7 @@ impl DownloadManager {
         let task_info = Arc::clone(&active_task.info);
         let completed_chunks = Arc::clone(&active_task.completed_chunks);
         let using_proxies = Arc::clone(&active_task.using_proxies);
+        let persist_to_disk = self.persist_to_disk;
 
         tokio::spawn(async move {
             let mut guard = TaskDropGuard {
@@ -1149,6 +1173,12 @@ impl DownloadManager {
                 cancel_token.clone(),
             )
             .await;
+
+            // If a newer resume generation superseded this worker, exit cleanly without overwriting state.
+            if active_task.generation.load(Ordering::SeqCst) != worker_gen {
+                guard.completed_cleanly = true;
+                return;
+            }
 
             {
                 let mut info = task_info.write().await;
@@ -1183,7 +1213,9 @@ impl DownloadManager {
             }
 
             // Persist updated queue state
-            save_queue_from_tasks(&tasks_map).await;
+            if persist_to_disk {
+                save_queue_from_tasks(&tasks_map).await;
+            }
 
             // Check if active queue has 0 remaining downloading tasks
             let active_remaining = {
@@ -1218,7 +1250,7 @@ impl DownloadManager {
                     info.speed_mbps = 0.0;
                     info.eta_seconds = 0;
                     info.active_workers = 0;
-                    Some(active.cancel_token.clone())
+                    Some(active.cancel_token.lock().clone())
                 } else {
                     None
                 }
@@ -1236,9 +1268,9 @@ impl DownloadManager {
         }
     }
 
-    /// Resumes a paused or failed download task, fetching only remaining incomplete chunks.
+    /// Resumes a paused, frozen, failed, or cancelled download task, fetching only remaining incomplete chunks.
     pub async fn resume_task(&self, id: &str) -> Result<bool, String> {
-        let (active_task, link, req) = {
+        let (active_task, link, req, new_token, worker_gen) = {
             let tasks = self.tasks.read().await;
             if let Some(active) = tasks.get(id) {
                 let mut info = active.info.write().await;
@@ -1246,26 +1278,121 @@ impl DownloadManager {
                     return Ok(false);
                 }
 
+                let link = MegaLink::parse(&active.req.url).map_err(|e| format!("Invalid URL: {}", e))?;
                 info.status = TaskStatus::Downloading;
                 info.error = None;
-                let link = MegaLink::parse(&active.req.url).map_err(|e| format!("Invalid URL: {}", e))?;
-                (Arc::clone(active), link, active.req.clone())
+                let new_token = CancellationToken::new();
+                *active.cancel_token.lock() = new_token.clone();
+                let worker_gen = active.generation.fetch_add(1, Ordering::SeqCst) + 1;
+                (Arc::clone(active), link, active.req.clone(), new_token, worker_gen)
             } else {
                 return Ok(false);
             }
         };
 
-        let new_token = CancellationToken::new();
         self.spawn_task_worker(
             id.to_string(),
             Arc::clone(&active_task),
             link,
             req,
             new_token,
+            worker_gen,
         );
 
         self.save_queue().await;
         Ok(true)
+    }
+
+    /// Pauses all currently downloading tasks atomically.
+    pub async fn pause_all_tasks(&self) -> usize {
+        let mut tokens = Vec::new();
+        {
+            let tasks = self.tasks.read().await;
+            for active in tasks.values() {
+                let mut info = active.info.write().await;
+                if info.status == TaskStatus::Downloading {
+                    info.status = TaskStatus::Paused;
+                    info.speed_mbps = 0.0;
+                    info.eta_seconds = 0;
+                    info.active_workers = 0;
+                    tokens.push(active.cancel_token.lock().clone());
+                }
+            }
+        }
+        let count = tokens.len();
+        for token in tokens {
+            token.cancel();
+        }
+        if count > 0 {
+            self.save_queue().await;
+        }
+        count
+    }
+
+    /// Resumes all paused/frozen tasks in the queue.
+    pub async fn resume_all_tasks(&self) -> usize {
+        let mut to_spawn = Vec::new();
+        {
+            let tasks = self.tasks.read().await;
+            for (id, active) in tasks.iter() {
+                let mut info = active.info.write().await;
+                if info.status == TaskStatus::Paused {
+                    if let Ok(link) = MegaLink::parse(&active.req.url) {
+                        info.status = TaskStatus::Downloading;
+                        info.error = None;
+                        let new_token = CancellationToken::new();
+                        *active.cancel_token.lock() = new_token.clone();
+                        let worker_gen = active.generation.fetch_add(1, Ordering::SeqCst) + 1;
+                        to_spawn.push((
+                            id.clone(),
+                            Arc::clone(active),
+                            link,
+                            active.req.clone(),
+                            new_token,
+                            worker_gen,
+                        ));
+                    }
+                }
+            }
+        }
+        let count = to_spawn.len();
+        for (id, active, link, req, new_token, worker_gen) in to_spawn {
+            self.spawn_task_worker(id, active, link, req, new_token, worker_gen);
+        }
+        if count > 0 {
+            self.save_queue().await;
+        }
+        count
+    }
+
+    /// Removes all completed tasks from the queue.
+    pub async fn clear_completed_tasks(&self) -> usize {
+        let completed_ids: Vec<String> = {
+            let tasks = self.tasks.read().await;
+            let mut ids = Vec::new();
+            for (id, active) in tasks.iter() {
+                if active.info.read().await.status == TaskStatus::Completed {
+                    ids.push(id.clone());
+                }
+            }
+            ids
+        };
+        if completed_ids.is_empty() {
+            return 0;
+        }
+        let mut removed = 0;
+        {
+            let mut tasks = self.tasks.write().await;
+            for id in completed_ids {
+                if tasks.remove(&id).is_some() {
+                    removed += 1;
+                }
+            }
+        }
+        if removed > 0 {
+            self.save_queue().await;
+        }
+        removed
     }
 
     /// Cancels an active download task by ID.
@@ -1278,7 +1405,7 @@ impl DownloadManager {
                 info.speed_mbps = 0.0;
                 info.eta_seconds = 0;
                 info.active_workers = 0;
-                Some(active.cancel_token.clone())
+                Some(active.cancel_token.lock().clone())
             } else {
                 None
             }
@@ -1293,14 +1420,14 @@ impl DownloadManager {
         }
     }
 
-    /// Removes a finished or cancelled download task from memory and queue.json.
+    /// Removes a download task from memory and queue.json.
     /// Aborts in-flight workers immediately and cleans up incomplete .part files and resume sidecars.
     pub async fn delete_task(&self, id: &str) -> bool {
         let (token_opt, output_path, status) = {
             let mut tasks = self.tasks.write().await;
             if let Some(active) = tasks.remove(id) {
                 let info = active.info.read().await.clone();
-                (Some(active.cancel_token.clone()), info.output_path, info.status)
+                (Some(active.cancel_token.lock().clone()), info.output_path, info.status)
             } else {
                 (None, String::new(), TaskStatus::Cancelled)
             }
@@ -1312,16 +1439,21 @@ impl DownloadManager {
 
             // If task was not completed, clean up .part files, .looker-resume, and incomplete files
             if status != TaskStatus::Completed && !output_path.is_empty() {
-                let path = PathBuf::from(&output_path);
-                let resume_p = resume_file_path(&path);
-                let _ = tokio::fs::remove_file(&resume_p).await;
+                let output_clone = output_path.clone();
+                tokio::spawn(async move {
+                    // Brief yield so cancelling workers drop Windows file handles cleanly
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                    let path = PathBuf::from(&output_clone);
+                    let resume_p = resume_file_path(&path);
+                    let _ = tokio::fs::remove_file(&resume_p).await;
 
-                let part_path = PathBuf::from(format!("{}.part", output_path));
-                let _ = tokio::fs::remove_file(&part_path).await;
+                    let part_path = PathBuf::from(format!("{}.part", output_clone));
+                    let _ = tokio::fs::remove_file(&part_path).await;
 
-                if path.is_file() {
-                    let _ = tokio::fs::remove_file(&path).await;
-                }
+                    if path.is_file() {
+                        let _ = tokio::fs::remove_file(&path).await;
+                    }
+                });
             }
             true
         } else {
@@ -1362,7 +1494,14 @@ impl DownloadManager {
             let info = active.info.read().await.clone();
             list.push(info);
         }
-        list.sort_by(|a, b| b.id.cmp(&a.id));
+        list.sort_by(|a, b| {
+            let seq_a = a.id.strip_prefix("task-").and_then(|s| s.parse::<usize>().ok());
+            let seq_b = b.id.strip_prefix("task-").and_then(|s| s.parse::<usize>().ok());
+            match (seq_a, seq_b) {
+                (Some(na), Some(nb)) => nb.cmp(&na),
+                _ => b.id.cmp(&a.id),
+            }
+        });
         list
     }
 }
@@ -1437,10 +1576,10 @@ async fn run_download_task(
     let gw_http = Arc::new(build_http_client(&gateway_addr, watchdog_secs).await);
 
     if link.is_folder_scope() {
-        let tree = mega
-            .fetch_folder_tree(&link)
-            .await
-            .map_err(|e| format!("Failed to fetch folder tree: {}", e))?;
+        let tree = tokio::select! {
+            _ = cancel_token.cancelled() => return Ok(()),
+            r = mega.fetch_folder_tree(&link) => r.map_err(|e| format!("Failed to fetch folder tree: {}", e))?,
+        };
 
         let candidate_title = req.title.as_deref().filter(|t| {
             let tr = t.trim();
@@ -1521,17 +1660,23 @@ async fn run_download_task(
 
             info!("Fetching storage URL for '{}'...", file_node.name);
 
-            let (download_url, _) = match mega.get_folder_file_url(&link.handle, &file_node.handle).await {
-                Ok(res) => res,
-                Err(e) => {
-                    error!(
-                        "Failed to fetch storage URL for file '{}' (handle: {}) after retries: {}",
-                        file_node.name, file_node.handle, e
-                    );
-                    return Err(format!(
-                        "Failed to get storage URL for '{}' after retries: {}",
-                        file_node.name, e
-                    ));
+            let (download_url, _) = tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    drop(permit);
+                    return Ok(());
+                }
+                r = mega.get_folder_file_url(&link.handle, &file_node.handle) => match r {
+                    Ok(res) => res,
+                    Err(e) => {
+                        error!(
+                            "Failed to fetch storage URL for file '{}' (handle: {}) after retries: {}",
+                            file_node.name, file_node.handle, e
+                        );
+                        return Err(format!(
+                            "Failed to get storage URL for '{}' after retries: {}",
+                            file_node.name, e
+                        ));
+                    }
                 }
             };
 
@@ -1589,10 +1734,10 @@ async fn run_download_task(
 
         info!("Folder transfer '{}' completed ({}/{} files)", folder_title, total_files, total_files);
     } else {
-        let meta = mega
-            .resolve_file(&link)
-            .await
-            .map_err(|e| format!("Failed to resolve file: {}", e))?;
+        let meta = tokio::select! {
+            _ = cancel_token.cancelled() => return Ok(()),
+            r = mega.resolve_file(&link) => r.map_err(|e| format!("Failed to resolve file: {}", e))?,
+        };
 
         let current_out = task_info.read().await.output_path.clone();
         let target_path = if !current_out.is_empty() && current_out != req.output_dir && Path::new(&current_out).exists() {
@@ -1750,29 +1895,6 @@ pub async fn download_single_file(
         return Ok(());
     }
 
-    // 1. Pre-allocate sparse file if needed, preserving existing file content
-    if let Some(parent) = active_path.parent() {
-        let _ = tokio::fs::create_dir_all(parent).await;
-    }
-    let std_file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&active_path)
-        .map_err(|e| format!("Cannot open {}: {}", active_path.display(), e))?;
-    let _ = std_file.set_len(file_size);
-    drop(std_file);
-
-    let shared_file = Arc::new(Mutex::new(
-        tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&active_path)
-            .await
-            .map_err(|e| format!("Async open failed: {}", e))?,
-    ));
-
     let mut already_done = {
         let guard = completed_chunks_map.read().await;
         guard.get(file_handle).cloned().unwrap_or_default()
@@ -1796,6 +1918,54 @@ pub async fn download_single_file(
     let chunk_notify = Arc::new(tokio::sync::Notify::new());
 
     let mut completed_chunks_count = scheduler.lock().completed_count();
+    let pre_completed_bytes: u64 = scheduler
+        .lock()
+        .completed_indices()
+        .iter()
+        .filter_map(|&idx| all_chunks.get(idx).map(|c| c.size))
+        .sum();
+    if pre_completed_bytes > 0 {
+        let current_cum = cumulative_bytes.fetch_add(pre_completed_bytes, Ordering::Relaxed) + pre_completed_bytes;
+        let progress = if grand_total_bytes > 0 {
+            ((current_cum as f64 / grand_total_bytes as f64) * 1000.0).round() / 10.0
+        } else {
+            0.0
+        };
+        let mut info = task_info.write().await;
+        info.downloaded_bytes = current_cum;
+        info.progress_percent = progress.min(100.0);
+    }
+
+    // If temp staging is enabled and this file was already moved to final destination in a prior run, skip re-downloading.
+    if completed_chunks_count == total_chunks && is_temp && !active_path.exists() && out_path.exists() {
+        if tokio::fs::metadata(out_path).await.map(|m| m.len()).unwrap_or(0) == file_size {
+            remove_resume_state(out_path);
+            return Ok(());
+        }
+    }
+
+    // 1. Pre-allocate sparse file if needed, preserving existing file content
+    if let Some(parent) = active_path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let std_file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&active_path)
+        .map_err(|e| format!("Cannot open {}: {}", active_path.display(), e))?;
+    let _ = std_file.set_len(file_size);
+    drop(std_file);
+
+    let shared_file = Arc::new(Mutex::new(
+        tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&active_path)
+            .await
+            .map_err(|e| format!("Async open failed: {}", e))?,
+    ));
 
     if completed_chunks_count < total_chunks {
         let (result_tx, mut result_rx) = mpsc::channel::<ChunkResult>(total_chunks + 32);
@@ -2167,6 +2337,12 @@ pub async fn download_single_file(
                                 warn!("Direct host connection hit MEGA 509 quota; switching workers to rotating proxy pool!");
                                 *last_host_509_at.write().await = Some(Instant::now());
                                 using_proxies.store(true, Ordering::SeqCst);
+                                {
+                                    let mut info = task_info.write().await;
+                                    if !info.routing_mode.eq_ignore_ascii_case("force_proxy") {
+                                        info.routing_mode = "509_failover".to_string();
+                                    }
+                                }
 
                                 if let Some(cmd) = &s.cmd_on_509_limit {
                                     let mut last_cmd = last_509_cmd_at.write().await;
@@ -2562,5 +2738,94 @@ mod tests {
         // Worker 0 later finishes chunk 3 -> duplicate ignored
         assert!(!scheduler.mark_completed(3));
         assert_eq!(scheduler.completed_count(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_freeze_before_start_pause_resume_and_queue_controls() {
+        let temp_dir = std::env::temp_dir().join(format!("looker_queue_ctrl_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let mut settings = AppSettings::default();
+        settings.freeze_before_start = true;
+        settings.speed_limit_mbps = 12.5;
+        settings.default_download_dir = temp_dir.to_string_lossy().to_string();
+
+        let pool = Arc::new(ProxyPool::new());
+        let mgr = DownloadManager::new_ephemeral("127.0.0.1:0".to_string(), pool, settings);
+
+        // Speed limit should stay directly in MB/s without KB/s conversion loss
+        let cfg = mgr.get_config().await;
+        assert_eq!(cfg.speed_limit_mbps, 12.5);
+
+        let req1 = DownloadRequest {
+            url: "https://mega.nz/file/abc12345#0123456789abcdef0123456789abcdef".to_string(),
+            selected_handles: vec![],
+            output_dir: temp_dir.to_string_lossy().to_string(),
+            category: "General".to_string(),
+            title: Some("Frozen File 1".to_string()),
+        };
+        let req2 = DownloadRequest {
+            url: "https://mega.nz/file/def67890#0123456789abcdef0123456789abcdef".to_string(),
+            selected_handles: vec![],
+            output_dir: temp_dir.to_string_lossy().to_string(),
+            category: "General".to_string(),
+            title: Some("Frozen File 2".to_string()),
+        };
+
+        let id1 = mgr.start_download(req1).await.unwrap();
+        let id2 = mgr.start_download(req2).await.unwrap();
+
+        let tasks = mgr.list_tasks().await;
+        assert_eq!(tasks.len(), 2);
+        assert!(tasks.iter().all(|t| t.status == TaskStatus::Paused));
+
+        // Resume task 1, then verify pause_task cancels its replaced cancel_token
+        assert!(mgr.resume_task(&id1).await.unwrap());
+        {
+            let map = mgr.tasks.read().await;
+            let t1 = map.get(&id1).unwrap();
+            assert_eq!(t1.generation.load(Ordering::SeqCst), 1);
+            assert!(!t1.cancel_token.lock().is_cancelled());
+        }
+
+        assert!(mgr.pause_task(&id1).await);
+        {
+            let map = mgr.tasks.read().await;
+            let t1 = map.get(&id1).unwrap();
+            assert_eq!(t1.info.read().await.status, TaskStatus::Paused);
+            assert!(t1.cancel_token.lock().is_cancelled());
+        }
+
+        // Resume again (gen 2) and pause again -> verifies cancel_token replacement works repeatedly!
+        assert!(mgr.resume_task(&id1).await.unwrap());
+        {
+            let map = mgr.tasks.read().await;
+            let t1 = map.get(&id1).unwrap();
+            assert_eq!(t1.generation.load(Ordering::SeqCst), 2);
+            assert!(!t1.cancel_token.lock().is_cancelled());
+        }
+        assert_eq!(mgr.pause_all_tasks().await, 1);
+        {
+            let map = mgr.tasks.read().await;
+            let t1 = map.get(&id1).unwrap();
+            assert_eq!(t1.info.read().await.status, TaskStatus::Paused);
+            assert!(t1.cancel_token.lock().is_cancelled());
+        }
+
+        // Mark task 2 completed and test clear_completed_tasks
+        {
+            let map = mgr.tasks.read().await;
+            map.get(&id2).unwrap().info.write().await.status = TaskStatus::Completed;
+        }
+        assert_eq!(mgr.clear_completed_tasks().await, 1);
+        let remaining = mgr.list_tasks().await;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, id1);
+
+        // Delete remaining task
+        assert!(mgr.delete_task(&id1).await);
+        assert!(mgr.list_tasks().await.is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

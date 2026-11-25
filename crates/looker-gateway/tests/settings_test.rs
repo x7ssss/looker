@@ -36,7 +36,7 @@ async fn test_settings_api_lifecycle() {
     let mut updated_settings = AppSettings::default();
     updated_settings.slots_per_file = 16;
     updated_settings.max_parallel_downloads = 5;
-    updated_settings.speed_limit_kbps = 10240; // 10 MB/s
+    updated_settings.speed_limit_mbps = 10.0; // 10 MB/s
     updated_settings.routing_mode = "force_proxy".to_string();
     updated_settings.proxy_selection_order = "random".to_string();
     updated_settings.clipboard_monitor = true;
@@ -62,6 +62,7 @@ async fn test_settings_api_lifecycle() {
     let resp_str2 = String::from_utf8_lossy(&buf2[..n2]);
     assert!(resp_str2.starts_with("HTTP/1.1 200 OK"));
     assert!(resp_str2.contains("\"slots_per_file\":16") || resp_str2.contains("\"slots_per_file\": 16"));
+    assert!(resp_str2.contains("\"speed_limit_mbps\":10.0") || resp_str2.contains("\"speed_limit_mbps\": 10.0"));
     assert!(resp_str2.contains("\"routing_mode\":\"force_proxy\"") || resp_str2.contains("\"routing_mode\": \"force_proxy\""));
     assert!(resp_str2.contains("\"clipboard_monitor\":true") || resp_str2.contains("\"clipboard_monitor\": true"));
     assert!(resp_str2.contains("\"stall_watchdog_seconds\":45") || resp_str2.contains("\"stall_watchdog_seconds\": 45"));

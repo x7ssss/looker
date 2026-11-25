@@ -2261,7 +2261,7 @@ checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "looker-app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "looker-gateway",
  "looker-geo",
@@ -2280,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "looker-down"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "indicatif",
@@ -2298,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "looker-gateway"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "dirs 6.0.0",
@@ -2322,7 +2322,7 @@ dependencies = [
 
 [[package]]
 name = "looker-geo"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "maxminddb",
  "memmap2",
@@ -2332,7 +2332,7 @@ dependencies = [
 
 [[package]]
 name = "looker-mega"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "aes",
  "base64 0.22.1",
@@ -2348,7 +2348,7 @@ dependencies = [
 
 [[package]]
 name = "looker-pool"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "looker-geo",
  "looker-protocol",
@@ -2363,7 +2363,7 @@ dependencies = [
 
 [[package]]
 name = "looker-protocol"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytes",
  "serde",
@@ -2373,7 +2373,7 @@ dependencies = [
 
 [[package]]
 name = "looker-proxy"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "looker-gateway",
@@ -2393,7 +2393,7 @@ dependencies = [
 
 [[package]]
 name = "looker-scraper"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "ipnet",
  "looker-geo",

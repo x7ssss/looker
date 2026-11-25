@@ -566,3 +566,123 @@ async fn test_api_csrf_origin_guard_and_strict_bind() {
     let resp7 = String::from_utf8_lossy(&buf7[..n7]);
     assert!(resp7.starts_with("HTTP/1.1 200 OK"), "Expected 200 OK on /live.txt, got: {}", resp7);
 }
+
+#[tokio::test]
+async fn test_task_pause_resume_and_bulk_queue_routes() {
+    use looker_gateway::{AppSettings, DownloadManager};
+
+    let temp_dir = std::env::temp_dir().join(format!("looker_routes_test_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&temp_dir);
+
+    let pool = Arc::new(ProxyPool::new());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gateway_addr = listener.local_addr().unwrap();
+
+    let mut settings = AppSettings::default();
+    settings.freeze_before_start = true;
+    settings.default_download_dir = temp_dir.to_string_lossy().to_string();
+
+    let mgr = Arc::new(DownloadManager::new_ephemeral(
+        gateway_addr.to_string(),
+        Arc::clone(&pool),
+        settings,
+    ));
+    let gateway = ProxyGateway::new(GatewayConfig::default(), Arc::clone(&pool))
+        .with_download_manager(Arc::clone(&mgr));
+
+    tokio::spawn(async move {
+        let _ = gateway.run_on_listener(listener).await;
+    });
+
+    // 1. Create a frozen task via POST /api/mega/download
+    let payload = serde_json::json!({
+        "url": "https://mega.nz/file/abc12345#0123456789abcdef0123456789abcdef",
+        "selected_handles": [],
+        "output_dir": temp_dir.to_string_lossy().to_string(),
+        "category": "General",
+        "title": "Route Test File"
+    })
+    .to_string();
+
+    let mut c1 = TcpStream::connect(gateway_addr).await.unwrap();
+    c1.write_all(
+        format!(
+            "POST /api/mega/download HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\n\r\n{}",
+            payload.len(),
+            payload
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut buf1 = vec![0u8; 2048];
+    let n1 = c1.read(&mut buf1).await.unwrap();
+    let resp1 = String::from_utf8_lossy(&buf1[..n1]);
+    assert!(resp1.starts_with("HTTP/1.1 200 OK"), "Unexpected response: {}", resp1);
+    let body1 = resp1.split("\r\n\r\n").nth(1).unwrap_or("");
+    let json1: serde_json::Value = serde_json::from_str(body1).unwrap();
+    let task_id = json1["task_id"].as_str().unwrap().to_string();
+
+    // Verify task is paused (because freeze_before_start = true)
+    let tasks = mgr.list_tasks().await;
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].status, looker_gateway::TaskStatus::Paused);
+
+    // 2. Resume task via POST /api/mega/tasks/:id/resume
+    let mut c2 = TcpStream::connect(gateway_addr).await.unwrap();
+    c2.write_all(
+        format!(
+            "POST /api/mega/tasks/{}/resume HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n",
+            task_id
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut buf2 = vec![0u8; 1024];
+    let n2 = c2.read(&mut buf2).await.unwrap();
+    let resp2 = String::from_utf8_lossy(&buf2[..n2]);
+    assert!(resp2.contains("\"success\":true"));
+
+    // 3. Pause all via POST /api/mega/tasks/pause-all
+    let mut c3 = TcpStream::connect(gateway_addr).await.unwrap();
+    c3.write_all(b"POST /api/mega/tasks/pause-all HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf3 = vec![0u8; 1024];
+    let n3 = c3.read(&mut buf3).await.unwrap();
+    let resp3 = String::from_utf8_lossy(&buf3[..n3]);
+    assert!(resp3.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp3.contains("\"success\":true"));
+
+    // 4. Clear completed via POST /api/mega/tasks/clear-completed
+    let mut c4 = TcpStream::connect(gateway_addr).await.unwrap();
+    c4.write_all(b"POST /api/mega/tasks/clear-completed HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 0\r\n\r\n")
+        .await
+        .unwrap();
+    let mut buf4 = vec![0u8; 1024];
+    let n4 = c4.read(&mut buf4).await.unwrap();
+    let resp4 = String::from_utf8_lossy(&buf4[..n4]);
+    assert!(resp4.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp4.contains("\"cleared\":0"));
+
+    // 5. Delete task via DELETE /api/mega/tasks/:id
+    let mut c5 = TcpStream::connect(gateway_addr).await.unwrap();
+    c5.write_all(
+        format!(
+            "DELETE /api/mega/tasks/{} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n",
+            task_id
+        )
+        .as_bytes(),
+    )
+    .await
+    .unwrap();
+    let mut buf5 = vec![0u8; 1024];
+    let n5 = c5.read(&mut buf5).await.unwrap();
+    let resp5 = String::from_utf8_lossy(&buf5[..n5]);
+    assert!(resp5.starts_with("HTTP/1.1 200 OK"));
+    assert!(resp5.contains("\"success\":true"));
+    assert!(mgr.list_tasks().await.is_empty());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

@@ -209,19 +209,26 @@ fn main() {
 
             let _tray = tray_builder.build(app)?;
 
+            let win_cfg = app.config().app.windows.first().cloned();
+            let window_builder = if let Some(ref cfg) = win_cfg {
+                WebviewWindowBuilder::from_config(app.handle(), cfg)?
+            } else {
+                WebviewWindowBuilder::new(
+                    app.handle(),
+                    "main",
+                    WebviewUrl::External("http://127.0.0.1:8080/ui".parse().unwrap()),
+                )
+                .title("Looker")
+                .inner_size(1080.0, 700.0)
+                .min_inner_size(860.0, 560.0)
+                .center()
+                .resizable(true)
+            };
+
             #[allow(unused_variables)]
-            let window = WebviewWindowBuilder::new(
-                app,
-                "main",
-                WebviewUrl::External("http://127.0.0.1:8080/ui".parse().unwrap()),
-            )
-            .title("Looker")
-            .inner_size(1280.0, 800.0)
-            .min_inner_size(900.0, 600.0)
-            .center()
-            .resizable(true)
-            .background_color(tauri::window::Color(12, 13, 16, 255))
-            .initialization_script(r#"
+            let window = window_builder
+                .background_color(tauri::window::Color(18, 18, 17, 255))
+                .initialization_script(r#"
                 window.addEventListener('keydown', (e) => {
                     if (e.key === 'F12' || (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'i'))) {
                         e.preventDefault();
@@ -229,11 +236,11 @@ fn main() {
                     }
                 });
             "#)
-            .on_new_window(|url, _features| {
-                let _ = opener::open(url.as_str());
-                NewWindowResponse::Deny
-            })
-            .build()?;
+                .on_new_window(|url, _features| {
+                    let _ = opener::open(url.as_str());
+                    NewWindowResponse::Deny
+                })
+                .build()?;
 
             #[cfg(debug_assertions)]
             let window_for_devtools = window.clone();
