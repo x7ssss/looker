@@ -28,8 +28,9 @@ Prebuilt standalone binaries and packages for Windows and Linux (x64) are availa
 🔗 **[Download Latest Release (GitHub)](https://github.com/x7ssss/looker/releases/latest)**
 
 ### Windows (x64)
-- 📥 **[Looker-Setup-x64.exe](https://github.com/x7ssss/looker/releases/latest)**
-- Single native setup installer powered by Rust and Windows WebView2. No Java Runtime Environment (JRE), Python runtime, or manual proxy list juggling required. Simply run the installer and launch Looker.
+- 📥 **[Looker-Setup-x64.exe](https://github.com/x7ssss/looker/releases/latest)** (Desktop GUI + CLI)
+- Single native setup installer powered by Rust and Windows WebView2. No Java Runtime Environment (JRE), Python runtime, or manual proxy list juggling required.
+- Also bundles `looker.exe` and automatically adds the install directory to your user `PATH` so `looker` is available in new PowerShell/terminal windows.
 
 ### Linux (x64)
 - 📥 **[Looker-Linux-x64.AppImage](https://github.com/x7ssss/looker/releases/latest)** or **[Looker-Linux-x64.deb](https://github.com/x7ssss/looker/releases/latest)**
@@ -44,6 +45,10 @@ Prebuilt standalone binaries and packages for Windows and Linux (x64) are availa
   ```bash
   sudo dpkg -i Looker-Linux-x64.deb
   ```
+
+### Standalone CLI (x64)
+- 📥 **[looker-windows-x64.exe](https://github.com/x7ssss/looker/releases/latest)** (Windows) / **[looker-linux-x64](https://github.com/x7ssss/looker/releases/latest)** (Linux)
+- Headless CLI (`looker dl <MEGA_URL>`) for terminal/server workflows without launching the desktop GUI. On Linux, mark executable (`chmod +x looker-linux-x64`) and move onto your `$PATH`.
 
 ---
 
@@ -82,10 +87,10 @@ cd looker
 # Run complete workspace test suite
 cargo test --workspace
 
-# Build optimized release CLI binaries (looker-proxy, looker-down)
-cargo build --release
+# Build optimized release CLI binaries (required before NSIS bundling so target/release/looker.exe exists)
+cargo build --release -p looker-down --bin looker
 
-# Build native desktop application and NSIS installer
+# Build native desktop application and NSIS installer (2-step order required on Windows)
 cd crates/looker-app
 cargo install tauri-cli --version "^2.0.0" --locked
 cargo tauri build --bundles nsis
